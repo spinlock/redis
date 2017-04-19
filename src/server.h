@@ -883,6 +883,8 @@ typedef struct {
     long long timeout;
     long long lastuse;
     long sending_msgs;
+    long long send_total;
+    long long recv_total;
     void *batched_iter;
     list *blocked_list;
 } asyncMigrationClient;
@@ -1770,6 +1772,7 @@ int *zunionInterGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *num
 int *evalGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
 int *sortGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
 int *migrateGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
+int *migrateAsyncGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
 int *georadiusGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
 
 /* Cluster */
@@ -2012,6 +2015,15 @@ void pfdebugCommand(client *c);
 void latencyCommand(client *c);
 void moduleCommand(client *c);
 void securityWarningCommand(client *c);
+
+void migrateAsyncCommand(client *c);
+void migrateAsyncDumpCommand(client *c);
+void migrateAsyncFenceCommand(client *c);
+void migrateAsyncStatusCommand(client *c);
+void migrateAsyncCancelCommand(client *c);
+void restoreAsyncCommand(client *c);
+void restoreAsyncAuthCommand(client *c);
+void restoreAsyncAckCommand(client *c);
 
 #if defined(__GNUC__)
 void *calloc(size_t count, size_t size) __attribute__ ((deprecated));
