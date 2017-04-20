@@ -726,7 +726,7 @@ typedef struct client {
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
     sds peerid;             /* Cached peer ID. */
 
-    list *migration_fence;  /* fence queue that client is blocking in */
+    list *migration_waitq;  /* wait queue that client is blocking in */
 
     /* Response buffer */
     int bufpos;
