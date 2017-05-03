@@ -2051,6 +2051,7 @@ void migrateAsyncStatusCommand(client *c);
 void migrateAsyncCancelCommand(client *c);
 void restoreAsyncCommand(client *c);
 void restoreAsyncAuthCommand(client *c);
+void restoreAsyncSelectCommand(client *c);
 void restoreAsyncAckCommand(client *c);
 
 #if defined(__GNUC__)
