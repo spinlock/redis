@@ -15,6 +15,12 @@ typedef struct {
     int copy, replace;
     long timeout;
     dict* keys;
+    robj *host, *port;
+
+    int migrated;
+    int num_keys;
+    robj** keys_array;
+    robj** vals_array;
 } migrateCommandArgs;
 
 static migrateCommandArgs* initMigrateCommandArgs(void) {
@@ -36,6 +42,18 @@ static void freeMigrateCommandArgs(migrateCommandArgs* args) {
         }
         dictReleaseIterator(it);
         dictRelease(args->keys);
+    }
+    if (args->host != NULL) {
+        decrRefCount(args->host);
+    }
+    if (args->port != NULL) {
+        decrRefCount(args->port);
+    }
+    if (args->keys_array != NULL) {
+        zfree(args->keys_array);
+    }
+    if (args->vals_array != NULL) {
+        zfree(args->vals_array);
     }
     zfree(args);
 }
@@ -86,6 +104,12 @@ static int parseMigrateCommand(client* c, migrateCommandArgs* args) {
     args->dbid = dbid;
     args->timeout = (timeout <= 0) ? 1000 : timeout;
 
+    args->host = c->argv[1];
+    incrRefCount(args->host);
+
+    args->port = c->argv[2];
+    incrRefCount(args->port);
+
     /* Check if the keys are here. If at least one key is to migrate, do it
      * otherwise if all the keys are missing reply with "NOKEY" to signal
      * the caller there was nothing to migrate. We don't return an error in
@@ -95,20 +119,57 @@ static int parseMigrateCommand(client* c, migrateCommandArgs* args) {
     args->keys = dictCreate(&objectKeyPointerValueDictType, NULL);
     for (int j = 0; j < num_keys; j++) {
         robj* key = c->argv[first_key + j];
-        robj* obj = lookupKeyRead(c->db, key);
-        if (obj != NULL && dictAdd(args->keys, key, obj) != C_ERR) {
+        robj* val = lookupKeyRead(c->db, key);
+        if (val != NULL && dictAdd(args->keys, key, val) != C_ERR) {
             incrRefCount(key);
-            incrRefCount(obj);
+            incrRefCount(val);
         }
     }
-    if (dictSize(args->keys) == 0) {
+    args->num_keys = dictSize(args->keys);
+
+    if (args->num_keys == 0) {
         addReplySds(c, sdsnew("+NOKEY\r\n"));
         return C_ERR;
     }
 
+    /* Put all key/value pairs into a flatten array. */
+    args->keys_array = zmalloc(sizeof(robj**) * args->num_keys);
+    args->vals_array = zmalloc(sizeof(robj**) * args->num_keys);
+
+    dictIterator* it = dictGetIterator(args->keys);
+    dictEntry* entry;
+    for (int i = 0; (entry = dictNext(it)) != NULL; i++) {
+        args->keys_array[i] = dictGetKey(entry);
+        args->vals_array[i] = dictGetVal(entry);
+    }
+    dictReleaseIterator(it);
+
     /* Rehash the keys dict if it's rehashing. */
     dictRehash(args->keys, 100);
     return C_OK;
+}
+
+static void migrateRewriteCommand(client* c, migrateCommandArgs* args) {
+    /* Translate MIGRATE as DEL for replication/AOF. Note that we do
+     * this only for the keys for which we received an acknowledgement
+     * from the receiving Redis server. */
+    if (!args->copy && args->migrated != 0) {
+        robj** newargv = zmalloc(sizeof(robj*) * (1 + args->migrated));
+        newargv[0] = createStringObject("DEL", 3);
+        for (int i = 0; i < args->migrated; i++) {
+            /* Populate the argument vector to replace the old one. */
+            robj* key = args->keys_array[i];
+            newargv[i + 1] = key;
+            incrRefCount(key);
+
+            /* No COPY option: remove the local key, signal the change. */
+            dbDelete(c->db, key);
+            signalModifiedKey(c->db, key);
+            server.dirty++;
+        }
+        /* Note that the following call takes ownership of newargv. */
+        replaceClientCommandVector(c, 1 + args->migrated, newargv);
+    }
 }
 
 /* MIGRATE socket cache implementation.
