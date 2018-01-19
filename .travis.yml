@@ -1,0 +1,15 @@
+language: c
+
+os:
+    - linux
+
+compiler:
+    - clang
+    - gcc
+
+before_install:
+    - sudo apt-get install tk-dev tcl-dev
+
+script:
+    - make
+    - make test

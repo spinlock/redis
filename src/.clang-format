@@ -1,0 +1,8 @@
+BasedOnStyle: Google
+ColumnLimit: 80
+
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+IndentCaseLabels: false
+IndentWidth: 4
