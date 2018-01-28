@@ -730,20 +730,20 @@ void loadServerConfigFromString(char *config) {
                 err = sentinelHandleConfiguration(argv+1,argc-1);
                 if (err) goto loaderr;
             }
-        } else if (!strcasecmp(argv[0],"async-migration-sendbuf-limit") && argc == 2) {
+        } else if (!strcasecmp(argv[0],"migrate-async-sendbuf-limit") && argc == 2) {
             long long size = memtoll(argv[1], NULL);
-            if (size <= 0 || size > CONFIG_ASYNC_MIGRATION_SENDBUF_LIMIT_MAX) {
-                err = "Invalid async-migration-sendbuf-limit";
+            if (size <= 0 || size > CONFIG_MAX_MIGRATE_ASYNC_SENDBUF_LIMIT) {
+                err = "Invalid migrate-async-sendbuf-limit";
                 goto loaderr;
             }
-            server.async_migration_sendbuf_limit = size;
-        } else if (!strcasecmp(argv[0],"async-migration-message-limit") && argc == 2) {
+            server.migrate_async_sendbuf_limit = size;
+        } else if (!strcasecmp(argv[0],"migrate-async-message-limit") && argc == 2) {
             long long size = memtoll(argv[1], NULL);
-            if (size <= 0 || size > CONFIG_ASYNC_MIGRATION_MESSAGE_LIMIT_MAX) {
-                err = "Invalid async-migration-message-limit";
+            if (size <= 0 || size > CONFIG_MAX_MIGRATE_ASYNC_MESSAGE_LIMIT) {
+                err = "Invalid migrate-async-message-limit";
                 goto loaderr;
             }
-            server.async_migration_message_limit = size;
+            server.migrate_async_message_limit = size;
         } else {
             err = "Bad directive or wrong number of arguments"; goto loaderr;
         }
@@ -1168,11 +1168,11 @@ void configSetCommand(client *c) {
     } config_set_enum_field(
       "appendfsync",server.aof_fsync,aof_fsync_enum) {
     } config_set_numerical_field(
-      "async-migration-sendbuf-limit",server.async_migration_sendbuf_limit,
-      1,CONFIG_ASYNC_MIGRATION_SENDBUF_LIMIT_MAX) {
+      "migrate-async-sendbuf-limit",server.migrate_async_sendbuf_limit,
+      1,CONFIG_MAX_MIGRATE_ASYNC_SENDBUF_LIMIT) {
     } config_set_numerical_field(
-      "async-migration-message-limit",server.async_migration_message_limit,
-      1,CONFIG_ASYNC_MIGRATION_MESSAGE_LIMIT_MAX) {
+      "migrate-async-message-limit",server.migrate_async_message_limit,
+      1,CONFIG_MAX_MIGRATE_ASYNC_MESSAGE_LIMIT) {
 
     /* Everyhing else is an error... */
     } config_set_else {
@@ -1307,8 +1307,8 @@ void configGetCommand(client *c) {
     config_get_numerical_field("cluster-slave-validity-factor",server.cluster_slave_validity_factor);
     config_get_numerical_field("repl-diskless-sync-delay",server.repl_diskless_sync_delay);
     config_get_numerical_field("tcp-keepalive",server.tcpkeepalive);
-    config_get_numerical_field("async-migration-sendbuf-limit",server.async_migration_sendbuf_limit);
-    config_get_numerical_field("async-migration-message-limit",server.async_migration_message_limit);
+    config_get_numerical_field("migrate-async-sendbuf-limit",server.migrate_async_sendbuf_limit);
+    config_get_numerical_field("migrate-async-message-limit",server.migrate_async_message_limit);
 
 
 
@@ -2075,8 +2075,8 @@ int rewriteConfig(char *path) {
     rewriteConfigYesNoOption(state,"lazyfree-lazy-expire",server.lazyfree_lazy_expire,CONFIG_DEFAULT_LAZYFREE_LAZY_EXPIRE);
     rewriteConfigYesNoOption(state,"lazyfree-lazy-server-del",server.lazyfree_lazy_server_del,CONFIG_DEFAULT_LAZYFREE_LAZY_SERVER_DEL);
     rewriteConfigYesNoOption(state,"slave-lazy-flush",server.repl_slave_lazy_flush,CONFIG_DEFAULT_SLAVE_LAZY_FLUSH);
-    rewriteConfigNumericalOption(state,"async-migration-sendbuf-limit",server.async_migration_sendbuf_limit,CONFIG_DEFAULT_ASYNC_MIGRATION_SENDBUF_LIMIT);
-    rewriteConfigNumericalOption(state,"async-migration-message-limit",server.async_migration_message_limit,CONFIG_DEFAULT_ASYNC_MIGRATION_MESSAGE_LIMIT);
+    rewriteConfigNumericalOption(state,"migrate-async-sendbuf-limit",server.migrate_async_sendbuf_limit,CONFIG_DEFAULT_MIGRATE_ASYNC_SENDBUF_LIMIT);
+    rewriteConfigNumericalOption(state,"migrate-async-message-limit",server.migrate_async_message_limit,CONFIG_DEFAULT_MIGRATE_ASYNC_MESSAGE_LIMIT);
 
     /* Rewrite Sentinel config if in Sentinel mode. */
     if (server.sentinel_mode) rewriteConfigSentinelOption(state);

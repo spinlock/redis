@@ -1185,7 +1185,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Cleanup expired MIGRATE-ASYNC cached clients. */
     run_with_period(1000) {
-        cleanupClientsForAsyncMigration();
+        cleanupClientsForMigrateAsync();
     }
 
     /* Start a scheduled BGSAVE if the corresponding flag is set. This is
@@ -1876,13 +1876,13 @@ void initServer(void) {
     }
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
-    server.async_migration_clients = zmalloc(sizeof(asyncMigrationClient) * server.dbnum);
+    server.migrate_async_clients = zmalloc(sizeof(server.migrate_async_clients[0]) * server.dbnum);
     for (j = 0; j < server.dbnum; j ++) {
-        asyncMigrationClient *ac = server.async_migration_clients + j;
+        migrateAsyncClient *ac = server.migrate_async_clients + j;
         memset(ac, 0, sizeof(*ac));
     }
-    server.async_migration_sendbuf_limit = CONFIG_DEFAULT_ASYNC_MIGRATION_SENDBUF_LIMIT;
-    server.async_migration_message_limit = CONFIG_DEFAULT_ASYNC_MIGRATION_MESSAGE_LIMIT;
+    server.migrate_async_sendbuf_limit = CONFIG_DEFAULT_MIGRATE_ASYNC_SENDBUF_LIMIT;
+    server.migrate_async_message_limit = CONFIG_DEFAULT_MIGRATE_ASYNC_MESSAGE_LIMIT;
 
     /* Open the TCP listening socket for the user commands. */
     if (server.port != 0 &&
@@ -2383,12 +2383,12 @@ int processCommand(client *c) {
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
 
     /* Only the RESTORE-ASYNC-ACK command will be accepted if current client
-     * has the CLIENT_ASYNC_MIGRATION flag. */
-    if (c->flags & CLIENT_ASYNC_MIGRATION) {
+     * has the CLIENT_MIGRATE_ASYNC flag. */
+    if (c->flags & CLIENT_MIGRATE_ASYNC) {
         if (!c->cmd || c->cmd->proc != restoreAsyncAckCommand) {
             addReplyErrorFormat(c,"invalid response command '%s'",
                     (char*)c->argv[0]->ptr);
-            serverLog(LL_WARNING, "async_migration[%d]: invalid response command '%s'",
+            serverLog(LL_WARNING, "migrate_async[%d]: invalid response command '%s'",
                     c->fd, (char*)c->argv[0]->ptr);
             c->flags |= CLIENT_CLOSE_AFTER_REPLY;
             return C_ERR;
@@ -2428,15 +2428,14 @@ int processCommand(client *c) {
         !(c->cmd->getkeys_proc == NULL && c->cmd->firstkey == 0 &&
           c->cmd->proc != execCommand);
 
-    /* Check if there's a read/migrate or write/migrate conflict. */
     if (check_keys) {
-        if (inConflictWithAsyncMigration(c, c->cmd, c->argv, c->argc)) {
+        if (inConflictWithMigrateAsync(c, c->cmd, c->argv, c->argc)) {
             if (c->cmd->proc == execCommand) {
                 discardTransaction(c);
             } else {
                 flagTransaction(c);
             }
-            addReplySds(c,sdsnew("-TRYAGAIN The specific keys are being migrated (async)\r\n"));
+            addReplySds(c,sdsnew("-TRYAGAIN The specific keys are being migrated\r\n"));
             return C_OK;
         }
     }

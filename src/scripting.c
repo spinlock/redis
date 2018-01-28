@@ -525,11 +525,10 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
         !server.loading &&
         !(server.lua_caller->flags & CLIENT_MASTER);
 
-    /* Check if there's a read/migrate or write/migrate conflict. */
     if (check_keys) {
-        if (inConflictWithAsyncMigration(c, c->cmd, c->argv, c->argc)) {
+        if (inConflictWithMigrateAsync(c, c->cmd, c->argv, c->argc)) {
             luaPushError(lua,
-                "Lua script attempted to access a key that is being migrated (async)");
+                "Lua script attempted to access a key that is being migrated");
             goto cleanup;
         }
     }

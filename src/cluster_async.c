@@ -105,7 +105,7 @@ static size_t estimateNumberOfRestoreCommands(redisDb* db, robj* key, size_t max
     return 1 + estimateNumberOfRestoreCommandsObject(obj, maxbulks);
 }
 
-static asyncMigrationClient* getAsyncMigrationClient(int db);
+static migrateAsyncClient* getMigrateAsyncClient(int db);
 
 // State Machine:
 //                    (1)
@@ -143,9 +143,9 @@ static int singleObjectIteratorNextStagePrepare(client* c, singleObjectIterator*
 
     int msgs = 0;
 
-    asyncMigrationClient* ac = getAsyncMigrationClient(c->db->id);
+    migrateAsyncClient* ac = getMigrateAsyncClient(c->db->id);
 
-    // If current client belongs to asyncMigrationClient, then:
+    // If current client belongs to migrateAsyncClient, then:
     //      1. Send RESTORE-ASYNC-AUTH   to verify password.
     //      2. Send RESTORE-ASYNC-SELECT to change database.
     if (ac->c == c) {
@@ -709,7 +709,7 @@ static batchedObjectIterator* createBatchedObjectIterator(mstime_t timeout) {
     listSetFreeMethod(it->iterator_list, freeSingleObjectIteratorVoid);
     it->finished_keys = listCreate();
     listSetFreeMethod(it->finished_keys, decrRefCountVoid);
-    it->maxbulks = server.async_migration_message_limit;
+    it->maxbulks = server.migrate_async_message_limit;
     it->delivered_msgs = 0;
     it->estimated_msgs = 0;
     return it;
@@ -829,17 +829,17 @@ static void batchedObjectIteratorStatus(client* c, batchedObjectIterator* it) {
 
 // ==================== Clients for Asynchronous Migration ==================
 
-// Get the asyncMigrationClient instance that belongs to the given database.
-static asyncMigrationClient* getAsyncMigrationClient(int db) {
-    return &server.async_migration_clients[db];
+// Get the migrateAsyncClient instance that belongs to the given database.
+static migrateAsyncClient* getMigrateAsyncClient(int db) {
+    return &server.migrate_async_clients[db];
 }
 
-// Wakeup the clients that is waiting on the specified asyncMigrationClient.
+// Wakeup the clients that is waiting on the specified migrateAsyncClient.
 // case errmsg != NULL:
 //      Client will be notified with RespErr.
 // case errmsg == NULL:
 //      Client will be notified with RespInt. (# of migrated keys)
-static void asyncMigrationClientInterrupt(asyncMigrationClient* ac, const char* errmsg) {
+static void migrateAsyncClientInterrupt(migrateAsyncClient* ac, const char* errmsg) {
     batchedObjectIterator* it = ac->batched_iterator;
     long ret = (it != NULL) ? (long)listLength(it->finished_keys) : -1;
 
@@ -864,7 +864,7 @@ static void asyncMigrationClientInterrupt(asyncMigrationClient* ac, const char* 
 
 // NOTE: Ensure it's only called by unblockClient() in blocked.c.
 // Remove the specified client from its waiting list.
-void unblockClientFromAsyncMigration(client* c) {
+void unblockClientFromMigrateAsync(client* c) {
     list* ll = c->migration_wait;
     if (ll != NULL) {
         listNode* node = listSearchKey(ll, c);
@@ -876,9 +876,9 @@ void unblockClientFromAsyncMigration(client* c) {
 }
 
 // NOTE: Ensure it's only called by freeClient() in networking.c.
-// Cancel and release an asyncMigrationClient due to various reasons.
-void releaseClientFromAsyncMigration(client* c) {
-    asyncMigrationClient* ac = getAsyncMigrationClient(c->db->id);
+// Cancel and release an migrateAsyncClient due to various reasons.
+void releaseClientFromMigrateAsync(client* c) {
+    migrateAsyncClient* ac = getMigrateAsyncClient(c->db->id);
     serverAssert(ac->c == c);
 
     batchedObjectIterator* it = ac->batched_iterator;
@@ -886,7 +886,7 @@ void releaseClientFromAsyncMigration(client* c) {
     int db = c->db->id;
 
     serverLog(LL_WARNING,
-              "async_migration[%d]: release connection %s:%d (DB=%d): "
+              "migrate_async[%d]: release connection %s:%d (DB=%d): "
               "pending_msgs(%lld), blocked_clients(%ld), iterator_list(%ld), "
               "timeout(%lldms), since_lastuse(%lldms)",
               ac->c->fd, ac->host, ac->port, db, ac->pending_msgs,
@@ -894,7 +894,7 @@ void releaseClientFromAsyncMigration(client* c) {
               (it != NULL) ? (long)listLength(it->iterator_list) : -1, ac->timeout,
               mstime() - ac->lastuse);
 
-    asyncMigrationClientInterrupt(ac, "interrupted: released connection");
+    migrateAsyncClientInterrupt(ac, "interrupted: released connection");
 
     sdsfree(ac->host);
     if (it != NULL) {
@@ -902,14 +902,14 @@ void releaseClientFromAsyncMigration(client* c) {
     }
     listRelease(ac->blocked_clients);
 
-    c->flags &= ~CLIENT_ASYNC_MIGRATION;
+    c->flags &= ~CLIENT_MIGRATE_ASYNC;
 
     memset(ac, 0, sizeof(*ac));
 }
 
 // Cancel the migration operation and wake up all blocked clients.
 static int asyncMigartionClientCancelErrorFormat(int db, const char* fmt, ...) {
-    asyncMigrationClient* ac = getAsyncMigrationClient(db);
+    migrateAsyncClient* ac = getMigrateAsyncClient(db);
     if (ac->c == NULL) {
         return 0;
     }
@@ -918,15 +918,15 @@ static int asyncMigartionClientCancelErrorFormat(int db, const char* fmt, ...) {
     sds errmsg = sdscatvprintf(sdsempty(), fmt, ap);
     va_end(ap);
 
-    serverLog(LL_WARNING, "async_migration[%d]: release connection %s:%d (DB=%d) (%s)", ac->c->fd,
+    serverLog(LL_WARNING, "migrate_async[%d]: release connection %s:%d (DB=%d) (%s)", ac->c->fd,
               ac->host, ac->port, db, errmsg);
 
     // Wake up the blocked clients with the specified error message.
-    asyncMigrationClientInterrupt(ac, errmsg);
+    migrateAsyncClientInterrupt(ac, errmsg);
 
     // Call freeClient() to release the migration connection.
-    // This operation will trigger releaseClientFromAsyncMigration() to destroy
-    // the asyncMigrationClient struct and release all related resources.
+    // This operation will trigger releaseClientFromMigrateAsync() to destroy
+    // the migrateAsyncClient struct and release all related resources.
     freeClient(ac->c);
 
     sdsfree(errmsg);
@@ -938,9 +938,9 @@ static int asyncMigartionClientCancelErrorFormat(int db, const char* fmt, ...) {
 
 // Close the previous client and dial a new one to the target instance, possibly
 // return a cached one if the target doesn't change.
-static asyncMigrationClient* asyncMigrationClientInit(int db, sds host, int port,
+static migrateAsyncClient* migrateAsyncClientInit(int db, sds host, int port,
                                                       mstime_t timeout) {
-    asyncMigrationClient* ac = getAsyncMigrationClient(db);
+    migrateAsyncClient* ac = getMigrateAsyncClient(db);
     if (ac->c != NULL) {
         // Check if we have an already cached socket for given host:port.
         if (ac->port == port && !strcmp(ac->host, host)) {
@@ -951,7 +951,7 @@ static asyncMigrationClient* asyncMigrationClientInit(int db, sds host, int port
     // Dial a new connection to host:port.
     int fd = anetTcpNonBlockConnect(server.neterr, host, port);
     if (fd == -1) {
-        serverLog(LL_WARNING, "async_migration: anetTcpNonBlockConnect %s:%d (DB=%d) (%s)", host,
+        serverLog(LL_WARNING, "migrate_async: anetTcpNonBlockConnect %s:%d (DB=%d) (%s)", host,
                   port, db, server.neterr);
         return NULL;
     }
@@ -964,7 +964,7 @@ static asyncMigrationClient* asyncMigrationClientInit(int db, sds host, int port
         wait = 10;
     }
     if ((aeWait(fd, AE_WRITABLE, wait) & AE_WRITABLE) == 0) {
-        serverLog(LL_WARNING, "async_migration: aeWait %s:%d (DB=%d) (io error or timeout)", host,
+        serverLog(LL_WARNING, "migrate_async: aeWait %s:%d (DB=%d) (io error or timeout)", host,
                   port, db);
         close(fd);
         return NULL;
@@ -973,14 +973,14 @@ static asyncMigrationClient* asyncMigrationClientInit(int db, sds host, int port
     // Create a new client struct to hold the socket.
     client* c = createClient(fd);
     if (c == NULL) {
-        serverLog(LL_WARNING, "async_migration: createClient %s:%d (DB=%d) (%s)", host, port, db,
+        serverLog(LL_WARNING, "migrate_async: createClient %s:%d (DB=%d) (%s)", host, port, db,
                   server.neterr);
         return NULL;
     }
 
     // Change the database.
     if (selectDb(c, db) != C_OK) {
-        serverLog(LL_WARNING, "async_migration: selectDb %s:%d (DB=%d) (invalid DB index)", host,
+        serverLog(LL_WARNING, "migrate_async: selectDb %s:%d (DB=%d) (invalid DB index)", host,
                   port, db);
         freeClient(c);
         return NULL;
@@ -988,7 +988,7 @@ static asyncMigrationClient* asyncMigrationClientInit(int db, sds host, int port
 
     // Mark this client as authenticated.
     // That is, the responded ack can be processed without authentication.
-    c->flags |= CLIENT_ASYNC_MIGRATION;
+    c->flags |= CLIENT_MIGRATE_ASYNC;
     c->authenticated = 1;
 
     // Cancel and release the previous client.
@@ -1004,13 +1004,13 @@ static asyncMigrationClient* asyncMigrationClientInit(int db, sds host, int port
     ac->pending_msgs = 0;
     ac->blocked_clients = listCreate();
     ac->batched_iterator = NULL;
-    serverLog(LL_WARNING, "async_migration[%d]: connect to %s:%d (DB=%d) OK", fd, host, port, db);
+    serverLog(LL_WARNING, "migrate_async[%d]: connect to %s:%d (DB=%d) OK", fd, host, port, db);
     return ac;
 }
 
 // Check if current database is being migrated.
-static int asyncMigrationClientStatusOrBlock(client* c, int block) {
-    asyncMigrationClient* ac = getAsyncMigrationClient(c->db->id);
+static int migrateAsyncClientStatusOrBlock(client* c, int block) {
+    migrateAsyncClient* ac = getMigrateAsyncClient(c->db->id);
     if (ac->batched_iterator == NULL) {
         return 0;
     }
@@ -1025,7 +1025,7 @@ static int asyncMigrationClientStatusOrBlock(client* c, int block) {
     c->migration_wait = ll;
     listAddNodeTail(ll, c);
 
-    blockClient(c, BLOCKED_ASYNC_MIGRATION);
+    blockClient(c, BLOCKED_MIGRATE_ASYNC);
     return 1;
 }
 
@@ -1069,9 +1069,9 @@ static mstime_t lookupImportingKeys(redisDb* db, robj* key, mstime_t now) {
 
 // NOTE: Ensure it's only called by serveCron() in server.c.
 // Check for timeouts.
-void cleanupClientsForAsyncMigration() {
+void cleanupClientsForMigrateAsync() {
     for (int db = 0; db < server.dbnum; db++) {
-        asyncMigrationClient* ac = getAsyncMigrationClient(db);
+        migrateAsyncClient* ac = getMigrateAsyncClient(db);
         if (ac->c == NULL) {
             continue;
         }
@@ -1089,8 +1089,8 @@ void cleanupClientsForAsyncMigration() {
 }
 
 // Check if there's a read/migrate or write/migrate conflict.
-int inConflictWithAsyncMigration(client* c, struct redisCommand* cmd, robj** argv, int argc) {
-    asyncMigrationClient* ac = getAsyncMigrationClient(c->db->id);
+int inConflictWithMigrateAsync(client* c, struct redisCommand* cmd, robj** argv, int argc) {
+    migrateAsyncClient* ac = getMigrateAsyncClient(c->db->id);
     if (ac->batched_iterator == NULL && !hasImportingKeys(c->db)) {
         return 0;
     }
@@ -1177,7 +1177,7 @@ void migrateAsyncDumpCommand(client* c) {
 
 // ==================== Command: MIGRATE-ASNYC ==============================
 
-static int asyncMigrationNextInMicroseconds(asyncMigrationClient* ac, int atleast,
+static int asyncMigrationNextInMicroseconds(migrateAsyncClient* ac, int atleast,
                                             long long usecs) {
     batchedObjectIterator* it = ac->batched_iterator;
     long long start = ustime();
@@ -1185,7 +1185,7 @@ static int asyncMigrationNextInMicroseconds(asyncMigrationClient* ac, int atleas
     while (batchedObjectIteratorHasNext(it)) {
         if (ac->pending_msgs + msgs != 0) {
             size_t usage = getClientOutputBufferMemoryUsage(ac->c);
-            size_t limit = server.async_migration_sendbuf_limit;
+            size_t limit = server.migrate_async_sendbuf_limit;
             if (limit <= usage) {
                 break;
             }
@@ -1202,7 +1202,7 @@ static int asyncMigrationNextInMicroseconds(asyncMigrationClient* ac, int atleas
 // MIGRATE-ASYNC $host $port $timeout $key1 [$key2 ...]
 void migrateAsyncCommand(client* c) {
     // Check if there's a migrate/migrate conflict.
-    if (asyncMigrationClientStatusOrBlock(c, 0)) {
+    if (migrateAsyncClientStatusOrBlock(c, 0)) {
         addReplyError(c, "the specified DB is being migrated");
         return;
     }
@@ -1230,7 +1230,7 @@ void migrateAsyncCommand(client* c) {
         timeout = 1000;
     }
 
-    asyncMigrationClient* ac = asyncMigrationClientInit(c->db->id, host, port, timeout);
+    migrateAsyncClient* ac = migrateAsyncClientInit(c->db->id, host, port, timeout);
     if (ac == NULL) {
         addReplyErrorFormat(c, "connect to %s:%d failed", host, (int)port);
         return;
@@ -1251,7 +1251,7 @@ void migrateAsyncCommand(client* c) {
     ac->pending_msgs += asyncMigrationNextInMicroseconds(ac, 4, 500);
 
     // Block current client until migration is completed.
-    asyncMigrationClientStatusOrBlock(c, 1);
+    migrateAsyncClientStatusOrBlock(c, 1);
 
     if (ac->pending_msgs != 0) {
         return;
@@ -1259,7 +1259,7 @@ void migrateAsyncCommand(client* c) {
 
     // Nothing happens - no key will be migrated.
     // Wake up current client and mark finished (release iterator).
-    asyncMigrationClientInterrupt(ac, NULL);
+    migrateAsyncClientInterrupt(ac, NULL);
 
     ac->batched_iterator = NULL;
     freeBatchedObjectIterator(it);
@@ -1270,7 +1270,7 @@ void migrateAsyncCommand(client* c) {
 // MIGRATE-ASYNC-FENCE
 void migrateAsyncFenceCommand(client* c) {
     // Block until the previous migration is completed.
-    if (asyncMigrationClientStatusOrBlock(c, 1)) {
+    if (migrateAsyncClientStatusOrBlock(c, 1)) {
         return;
     }
     // Nothing is being migrated, just return -1.
@@ -1288,7 +1288,7 @@ void migrateAsyncCancelCommand(client* c) {
 
 // MIGRATE-ASYNC-STATUS
 void migrateAsyncStatusCommand(client* c) {
-    asyncMigrationClient* ac = getAsyncMigrationClient(c->db->id);
+    migrateAsyncClient* ac = getMigrateAsyncClient(c->db->id);
     if (ac->c == NULL) {
         addReply(c, shared.nullmultibulk);
         return;
@@ -1330,7 +1330,7 @@ void migrateAsyncStatusCommand(client* c) {
 
     total++;
     addReplyBulkCString(c, "sendbuf_limit");
-    addReplyBulkLongLong(c, server.async_migration_sendbuf_limit);
+    addReplyBulkLongLong(c, server.migrate_async_sendbuf_limit);
 
     total++;
     addReplyBulkCString(c, "blocked_clients");
@@ -1629,7 +1629,7 @@ static void deleteImportingKeys(redisDb* db, robj* key) { dictDelete(db->importi
 //               zset   $key $ttlms $maxsize [$elem1 $score1 ...]
 void restoreAsyncCommand(client* c) {
     // Check if there's a restore/migrate conflict.
-    if (asyncMigrationClientStatusOrBlock(c, 0)) {
+    if (migrateAsyncClientStatusOrBlock(c, 0)) {
         asyncMigrationReplyAckErrorFormat(c, "the specified DB is being migrated");
         return;
     }
@@ -1787,7 +1787,7 @@ bad_arguments_number:
 
 static int restoreAsyncAckCommandHandle(client* c) {
     // Only the migration client can call this function.
-    asyncMigrationClient* ac = getAsyncMigrationClient(c->db->id);
+    migrateAsyncClient* ac = getMigrateAsyncClient(c->db->id);
     if (ac->c != c) {
         addReplyErrorFormat(c, "invalid client, permission denied");
         return C_ERR;
@@ -1800,19 +1800,19 @@ static int restoreAsyncAckCommandHandle(client* c) {
     }
 
     if (errcode != 0) {
-        serverLog(LL_WARNING, "async_migration[%d]: error[%d] (%s)", c->fd, (int)errcode,
+        serverLog(LL_WARNING, "migrate_async[%d]: error[%d] (%s)", c->fd, (int)errcode,
                   (char*)c->argv[2]->ptr);
         return C_ERR;
     }
 
     batchedObjectIterator* it = ac->batched_iterator;
     if (it == NULL) {
-        serverLog(LL_WARNING, "async_migration[%d]: nil batched iterator", c->fd);
+        serverLog(LL_WARNING, "migrate_async[%d]: nil batched iterator", c->fd);
         addReplyError(c, "invalid iterator (nil)");
         return C_ERR;
     }
     if (ac->pending_msgs == 0) {
-        serverLog(LL_WARNING, "async_migration[%d]: not sending messages", c->fd);
+        serverLog(LL_WARNING, "migrate_async[%d]: not sending messages", c->fd);
         addReplyError(c, "invalid iterator (pending_msgs=0)");
         return C_ERR;
     }
@@ -1826,7 +1826,7 @@ static int restoreAsyncAckCommandHandle(client* c) {
     if (ac->pending_msgs != 0) {
         return C_OK;
     }
-    asyncMigrationClientInterrupt(ac, NULL);
+    migrateAsyncClientInterrupt(ac, NULL);
 
     // Remove all migrated keys from database asynchronously.
     if (listLength(it->finished_keys) != 0) {

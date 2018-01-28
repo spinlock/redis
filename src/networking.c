@@ -832,8 +832,8 @@ void freeClient(client *c) {
             replicationGetSlaveName(c));
     }
 
-    if (c->flags & CLIENT_ASYNC_MIGRATION) {
-        releaseClientFromAsyncMigration(c);
+    if (c->flags & CLIENT_MIGRATE_ASYNC) {
+        releaseClientFromMigrateAsync(c);
     }
 
     /* Free the query buffer */
@@ -1922,8 +1922,8 @@ int checkClientOutputBufferLimits(client *c) {
     int soft = 0, hard = 0, class;
     unsigned long used_mem = getClientOutputBufferMemoryUsage(c);
 
-    /* Just ignore the output buffer limits if client is used asynchronous migration. */
-    if (c->flags & CLIENT_ASYNC_MIGRATION) {
+    /* Just ignore the output buffer limits if client is used non-blocking migration. */
+    if (c->flags & CLIENT_MIGRATE_ASYNC) {
         return 0;
     }
 

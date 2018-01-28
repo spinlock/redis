@@ -141,8 +141,8 @@ void unblockClient(client *c) {
         unblockClientWaitingReplicas(c);
     } else if (c->btype == BLOCKED_MODULE) {
         unblockClientFromModule(c);
-    } else if (c->btype == BLOCKED_ASYNC_MIGRATION) {
-        unblockClientFromAsyncMigration(c);
+    } else if (c->btype == BLOCKED_MIGRATE_ASYNC) {
+        unblockClientFromMigrateAsync(c);
     } else {
         serverPanic("Unknown btype in unblockClient().");
     }

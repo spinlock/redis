@@ -163,10 +163,10 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CONFIG_DEFAULT_DEFRAG_CYCLE_MAX 75 /* 75% CPU max (at upper threshold) */
 #define CONFIG_DEFAULT_PROTO_MAX_BULK_LEN (512ll*1024*1024) /* Bulk request max size */
 
-#define CONFIG_DEFAULT_ASYNC_MIGRATION_SENDBUF_LIMIT (1024*1024*8)
-#define CONFIG_DEFAULT_ASYNC_MIGRATION_MESSAGE_LIMIT 200
-#define CONFIG_ASYNC_MIGRATION_SENDBUF_LIMIT_MAX (1024*1024*1024)
-#define CONFIG_ASYNC_MIGRATION_MESSAGE_LIMIT_MAX (1000*1000)
+#define CONFIG_DEFAULT_MIGRATE_ASYNC_SENDBUF_LIMIT (1024*1024*8)
+#define CONFIG_DEFAULT_MIGRATE_ASYNC_MESSAGE_LIMIT (200)
+#define CONFIG_MAX_MIGRATE_ASYNC_SENDBUF_LIMIT     (1024*1024*1024)
+#define CONFIG_MAX_MIGRATE_ASYNC_MESSAGE_LIMIT     (1000*1000)
 
 #define ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP 20 /* Loopkups per loop. */
 #define ACTIVE_EXPIRE_CYCLE_FAST_DURATION 1000 /* Microseconds */
@@ -256,7 +256,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CLIENT_LUA_DEBUG_SYNC (1<<26)  /* EVAL debugging without fork() */
 #define CLIENT_MODULE (1<<27) /* Non connected client used by some module. */
 
-#define CLIENT_ASYNC_MIGRATION (1<<28) /* This client is an asynchronous migration connection. */
+#define CLIENT_MIGRATE_ASYNC (1<<28) /* This client is an non-blocking migration connection. */
 
 /* Client block type (btype field in client structure)
  * if CLIENT_BLOCKED flag is set. */
@@ -265,7 +265,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define BLOCKED_WAIT 2              /* WAIT for synchronous replication. */
 #define BLOCKED_MODULE 3            /* Blocked by a loadable module. */
 #define BLOCKED_STREAM 4            /* XREAD. */
-#define BLOCKED_ASYNC_MIGRATION 5   /* Blocked by asynchronous migration. */
+#define BLOCKED_MIGRATE_ASYNC 5     /* Blocked by non-blocking migration. */
 #define BLOCKED_NUM 6               /* Number of blocked states. */
 
 /* Client request types */
@@ -904,7 +904,7 @@ typedef struct {
     long long pending_msgs;     /* Number of commands that is marked sent but not delivered. */
     void *batched_iterator;     /* Pointer to the batchedObjectIterator that is being migrated. */
     list *blocked_clients;      /* Clients blocked by data migration */
-} asyncMigrationClient;
+} migrateAsyncClient;
 
 struct redisServer {
     /* General */
@@ -955,7 +955,7 @@ struct redisServer {
     int clients_paused;         /* True if clients are currently paused */
     mstime_t clients_pause_end_time; /* Time when we undo clients_paused */
     char neterr[ANET_ERR_LEN];   /* Error buffer for anet.c */
-    asyncMigrationClient *async_migration_clients; /* MIGARTE-ASYNC cached clients */
+    migrateAsyncClient *migrate_async_clients; /* MIGARTE-ASYNC cached clients */
     dict *migrate_cached_sockets;/* MIGRATE cached sockets */
     uint64_t next_client_id;    /* Next client unique ID. Incremental. */
     int protected_mode;         /* Don't accept external connections. */
@@ -1200,8 +1200,8 @@ struct redisServer {
     int cluster_announce_port;     /* base port to announce on cluster bus. */
     int cluster_announce_bus_port; /* bus port to announce on cluster bus. */
 
-    size_t async_migration_sendbuf_limit; /* Limit client sending buffer for asyncMigrationClient. */
-    size_t async_migration_message_limit; /* Limit message size of every single RESTORE-ASYNC command. */
+    size_t migrate_async_sendbuf_limit; /* Limit client sending buffer for non-blocking migration. */
+    size_t migrate_async_message_limit; /* Limit message size of every single RESTORE-ASYNC command. */
 
     /* Scripting */
     lua_State *lua; /* The Lua interpreter. We use just one for all clients */
@@ -1864,10 +1864,10 @@ char *redisGitSHA1(void);
 char *redisGitDirty(void);
 uint64_t redisBuildId(void);
 
-/* Asynchronous Migration */
-void cleanupClientsForAsyncMigration();
-void releaseClientFromAsyncMigration(client *c);
-void unblockClientFromAsyncMigration(client *c);
+/* non-blocking Migration */
+void cleanupClientsForMigrateAsync();
+void releaseClientFromMigrateAsync(client *c);
+void unblockClientFromMigrateAsync(client *c);
 
 /* Commands prototypes */
 void authCommand(client *c);
