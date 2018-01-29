@@ -628,7 +628,8 @@ typedef struct redisDb {
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
     dict *ready_keys;           /* Blocked keys that received a PUSH */
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
-    dict *importing_keys;       /* The importing keys for RESTORE-ASYNC */
+    dict *migrate_async_keys;   /* MIGRATE-ASYNC keys */
+    dict *restore_async_keys;   /* RESTORE-ASYNC keys */
     int id;                     /* Database ID */
     long long avg_ttl;          /* Average TTL, just for stats */
 } redisDb;
@@ -745,7 +746,7 @@ typedef struct client {
     sds peerid;             /* Cached peer ID. */
     listNode *client_list_node; /* list node in client list */
 
-    list *migration_wait;   /* wait queue that client is blocking in */
+    listNode *migrate_async_list_node;   /* list node in migrateAsyncClient's blocked_clients */
 
     /* Response buffer */
     int bufpos;
@@ -901,7 +902,7 @@ typedef struct {
     int authenticated;          /* If client has been authenticated. */
     mstime_t timeout;           /* Client timeout in milliseconds. */
     mstime_t lastuse;           /* Timestamp of the last operation, used for timeout, in milliseconds. */
-    long long pending_msgs;     /* Number of commands that is marked sent but not delivered. */
+    long long pending_messages; /* Number of commands that are marked sent but not delivered. */
     void *batched_iterator;     /* Pointer to the batchedObjectIterator that is being migrated. */
     list *blocked_clients;      /* Clients blocked by data migration */
 } migrateAsyncClient;
