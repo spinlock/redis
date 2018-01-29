@@ -628,7 +628,6 @@ typedef struct redisDb {
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
     dict *ready_keys;           /* Blocked keys that received a PUSH */
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
-    dict *migrate_async_keys;   /* MIGRATE-ASYNC keys */
     dict *restore_async_keys;   /* RESTORE-ASYNC keys */
     int id;                     /* Database ID */
     long long avg_ttl;          /* Average TTL, just for stats */
