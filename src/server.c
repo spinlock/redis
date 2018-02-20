@@ -270,8 +270,11 @@ struct redisCommand redisCommandTable[] = {
     {"unwatch",unwatchCommand,1,"sF",0,NULL,0,0,0,0,0},
     {"cluster",clusterCommand,-2,"a",0,NULL,0,0,0,0,0},
     {"restore",restoreCommand,-4,"wm",0,NULL,1,1,1,0,0},
+    {"restore-async",restoreAsyncCommand,-4,"wm",0,NULL,1,1,1,0,0},
     {"restore-asking",restoreCommand,-4,"wmk",0,NULL,1,1,1,0,0},
+    {"restore-async-asking",restoreAsyncCommand,-4,"wmk",0,NULL,1,1,1,0,0},
     {"migrate",migrateCommand,-6,"w",0,migrateGetKeys,0,0,0,0,0},
+    {"migrate-async",migrateAsyncCommand,-6,"w",0,migrateGetKeys,0,0,0,0,0},
     {"asking",askingCommand,1,"F",0,NULL,0,0,0,0,0},
     {"readonly",readonlyCommand,1,"F",0,NULL,0,0,0,0,0},
     {"readwrite",readwriteCommand,1,"F",0,NULL,0,0,0,0,0},
@@ -1174,6 +1177,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         migrateCloseTimedoutSockets();
     }
 
+    /* Cleanup expired RESTORE-ASYNC commands. */
+    run_with_period(1000) {
+        restoreCloseTimedoutCommands();
+    }
+
     /* Start a scheduled BGSAVE if the corresponding flag is set. This is
      * useful when we are forced to postpone a BGSAVE because an AOF
      * rewrite is in progress.
@@ -1892,6 +1900,7 @@ void initServer(void) {
         server.db[j].blocking_keys = dictCreate(&keylistDictType,NULL);
         server.db[j].ready_keys = dictCreate(&objectKeyPointerValueDictType,NULL);
         server.db[j].watched_keys = dictCreate(&keylistDictType,NULL);
+        server.db[j].migrate_locked_keys = dictCreate(&objectKeyPointerValueDictType,NULL);
         server.db[j].id = j;
         server.db[j].avg_ttl = 0;
     }
@@ -1986,6 +1995,7 @@ void initServer(void) {
     slowlogInit();
     latencyMonitorInit();
     bioInit();
+    migrateBackgroundThread();
     server.initial_memory_usage = zmalloc_used_memory();
 }
 

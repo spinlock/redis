@@ -258,7 +258,10 @@ typedef long long mstime_t; /* millisecond time type. */
 #define BLOCKED_WAIT 2    /* WAIT for synchronous replication. */
 #define BLOCKED_MODULE 3  /* Blocked by a loadable module. */
 #define BLOCKED_STREAM 4  /* XREAD. */
-#define BLOCKED_NUM 5     /* Number of blocked states. */
+#define BLOCKED_MIGRATE 5 /* MIGRATE-ASYNC. */
+#define BLOCKED_RESTORE 6 /* RESTORE-ASYNC. */
+#define BLOCKED_NUM 7     /* Number of blocked states. */
+
 
 /* Client request types */
 #define PROTO_REQ_INLINE 1
@@ -620,6 +623,7 @@ typedef struct redisDb {
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
     dict *ready_keys;           /* Blocked keys that received a PUSH */
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
+    dict *migrate_locked_keys;  /* MIGRATE-ASYNC locked keys */
     int id;                     /* Database ID */
     long long avg_ttl;          /* Average TTL, just for stats */
 } redisDb;
@@ -682,6 +686,9 @@ typedef struct readyList {
     robj *key;
 } readyList;
 
+typedef struct _migrateCommandArgs migrateCommandArgs;
+typedef struct _restoreCommandArgs restoreCommandArgs;
+
 /* With multiplexing we need to take per-client state.
  * Clients are taken in a linked list. */
 typedef struct client {
@@ -735,6 +742,10 @@ typedef struct client {
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
     sds peerid;             /* Cached peer ID. */
     listNode *client_list_node; /* list node in client list */
+
+    /* Arguments for non-blocking migration */
+    migrateCommandArgs *migrate_command_args;
+    restoreCommandArgs *restore_command_args;
 
     /* Response buffer */
     int bufpos;
@@ -1779,7 +1790,6 @@ unsigned short crc16(const char *buf, int len);
 unsigned int keyHashSlot(char *key, int keylen);
 void clusterCron(void);
 void clusterPropagatePublish(robj *channel, robj *message);
-void migrateCloseTimedoutSockets(void);
 void clusterBeforeSleep(void);
 
 /* Sentinel */
@@ -1835,6 +1845,17 @@ void dictSdsDestructor(void *privdata, void *val);
 char *redisGitSHA1(void);
 char *redisGitDirty(void);
 uint64_t redisBuildId(void);
+
+/* migarte.c -- non-blocking migartion */
+void migrateBackgroundThread(void);
+void migrateAsyncCommand(client *c);
+void restoreAsyncCommand(client *c);
+void unblockClientFromMigrate(client *c);
+void unblockClientFromRestore(client *c);
+void freeMigrateCommandArgsFromFreeClient(client *c);
+void freeRestoreCommandArgsFromFreeClient(client *c);
+void migrateCloseTimedoutSockets(void);
+void restoreCloseTimedoutCommands(void);
 
 /* Commands prototypes */
 void authCommand(client *c);

@@ -145,6 +145,8 @@ client *createClient(int fd) {
     c->pubsub_patterns = listCreate();
     c->peerid = NULL;
     c->client_list_node = NULL;
+    c->migrate_command_args = NULL;
+    c->restore_command_args = NULL;
     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
     if (fd != -1) linkClient(c);
@@ -892,6 +894,8 @@ void freeClient(client *c) {
 
     /* Release other dynamically allocated client structure fields,
      * and finally release the client structure itself. */
+    if (c->migrate_command_args) freeMigrateCommandArgsFromFreeClient(c);
+    if (c->restore_command_args) freeRestoreCommandArgsFromFreeClient(c);
     if (c->name) decrRefCount(c->name);
     zfree(c->argv);
     freeClientMultiState(c);
