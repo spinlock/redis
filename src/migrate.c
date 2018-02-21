@@ -192,6 +192,167 @@ static sds syncSelectCommand(int fd, mstime_t timeout, int dbid) {
                : NULL;
 }
 
+// ---------------- MIGRATE / MIGRATE-ASYNC --------------------------------- //
+
+struct _migrateCommandArgs {
+    redisDb* db;
+    robj* host;
+    robj* port;
+    robj* auth;
+    int dbid;
+    int copy, replace;
+    int num_keys;
+    int non_blocking;
+    mstime_t timeout;
+
+    struct {
+        robj* key;
+        robj* obj;
+        mstime_t expireat;
+        int pending;
+        int success;
+    } * kvpairs;
+
+    migrateCachedSocket* socket;
+    sds errmsg;
+
+    const char* cmd_name;
+
+    client* client;
+};
+
+static void freeMigrateCommandArgs(migrateCommandArgs* args) {
+    if (args->host != NULL) {
+        decrRefCount(args->host);
+    }
+    if (args->port != NULL) {
+        decrRefCount(args->port);
+    }
+    if (args->auth != NULL) {
+        decrRefCount(args->auth);
+    }
+    if (args->kvpairs != NULL) {
+        for (int j = 0; j < args->num_keys; j++) {
+            robj* key = args->kvpairs[j].key;
+            robj* obj = args->kvpairs[j].obj;
+            decrRefCount(key);
+            decrRefCountLazyfree(obj);
+        }
+        zfree(args->kvpairs);
+    }
+    if (args->socket != NULL) {
+        if (args->socket->error) {
+            migrateCloseSocket(args->socket);
+        } else {
+            args->socket->inuse = 0;
+        }
+    }
+    if (args->errmsg != NULL) {
+        sdsfree(args->errmsg);
+    }
+    zfree(args);
+}
+
+// MIGRATE       host port key dbid timeout [COPY | REPLACE | AUTH password]
+// MIGRATE-ASYNC host port key dbid timeout [COPY | REPLACE | AUTH password]
+//
+// MIGRATE       host port ""  dbid timeout [COPY | REPLACE | AUTH password]
+//               KEYS key1 key2 ... keyN
+// MIGRATE-ASYNC host port ""  dbid timeout [COPY | REPLACE | AUTH password]
+//               KEYS key1 key2 ... keyN
+static migrateCommandArgs* initMigrateCommandArgsOrReply(client* c,
+                                                         int non_blocking) {
+    migrateCommandArgs* args = zcalloc(sizeof(*args));
+    int num_keys = 1, first_key = 3;
+    for (int j = 6; j < c->argc; j++) {
+        int moreargs = (j != c->argc - 1);
+        if (strcasecmp(c->argv[j]->ptr, "copy") == 0) {
+            args->copy = 1;
+        } else if (strcasecmp(c->argv[j]->ptr, "replace") == 0) {
+            args->replace = 1;
+        } else if (strcasecmp(c->argv[j]->ptr, "auth") == 0) {
+            if (!moreargs) {
+                addReply(c, shared.syntaxerr);
+                goto failed_cleanup;
+            }
+            j++;
+            args->auth = c->argv[j];
+            incrRefCount(args->auth);
+        } else if (strcasecmp(c->argv[j]->ptr, "keys") == 0) {
+            if (sdslen(c->argv[3]->ptr) != 0) {
+                addReplyError(c,
+                              "When using MIGRATE KEYS option, the key argument"
+                              " must be set to the empty string");
+                goto failed_cleanup;
+            }
+            first_key = j + 1;
+            num_keys = c->argc - j - 1;
+            goto parsed_options;
+        } else {
+            addReply(c, shared.syntaxerr);
+            goto failed_cleanup;
+        }
+    }
+
+parsed_options:
+    args->non_blocking = non_blocking;
+
+    args->host = c->argv[1];
+    incrRefCount(args->host);
+
+    args->port = c->argv[2];
+    incrRefCount(args->port);
+
+    long dbid, timeout;
+    if (getLongFromObjectOrReply(c, c->argv[5], &timeout, NULL) != C_OK ||
+        getLongFromObjectOrReply(c, c->argv[4], &dbid, NULL) != C_OK) {
+        goto failed_cleanup;
+    }
+
+    args->dbid = (int)dbid;
+    args->timeout = (timeout <= 0) ? 1000 : timeout;
+
+    args->kvpairs = zmalloc(sizeof(args->kvpairs[0]) * num_keys);
+
+    for (int i = 0; i < num_keys; i++) {
+        robj* key = c->argv[first_key + i];
+        robj* obj = lookupKeyRead(c->db, key);
+        if (obj == NULL) {
+            continue;
+        }
+        int j = args->num_keys++;
+        args->kvpairs[j].key = key;
+        args->kvpairs[j].obj = obj;
+        args->kvpairs[j].expireat = getExpire(c->db, key);
+        incrRefCount(key);
+        incrRefCount(obj);
+    }
+
+    if (args->num_keys == 0) {
+        addReplySds(c, sdsnew("+NOKEY\r\n"));
+        goto failed_cleanup;
+    }
+    migrateCachedSocket* cs = migrateGetSocketOrReply(
+        c, args->host, args->port, args->auth, args->timeout);
+    if (cs == NULL) {
+        goto failed_cleanup;
+    }
+    serverAssert(!cs->inuse && !cs->error);
+
+    args->socket = cs;
+    args->socket->inuse = 1;
+    args->socket->last_use_time = server.unixtime;
+
+    args->db = c->db;
+    args->cmd_name = args->non_blocking ? "MIGRATE-ASYNC" : "MIGRATE";
+    args->client = c;
+    return args;
+
+failed_cleanup:
+    freeMigrateCommandArgs(args);
+    return NULL;
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
