@@ -46,11 +46,23 @@ size_t lazyfreeGetFreeEffort(robj *obj) {
     }
 }
 
+#define LAZYFREE_THRESHOLD 64
+
+/* Try to reclaim an object in lazyfree way. */
+void decrRefCountLazyfree(robj* obj) {
+    if (obj->refcount != 1 ||
+        lazyfreeGetFreeEffort(obj) <= LAZYFREE_THRESHOLD) {
+        decrRefCount(obj);
+    } else {
+        atomicIncr(lazyfree_objects, 1);
+        bioCreateBackgroundJob(BIO_LAZY_FREE, obj, NULL, NULL);
+    }
+}
+
 /* Delete a key, value, and associated expiration entry if any, from the DB.
  * If there are enough allocations to free the value object may be put into
  * a lazy free list instead of being freed synchronously. The lazy free list
  * will be reclaimed in a different bio.c thread. */
-#define LAZYFREE_THRESHOLD 64
 int dbAsyncDelete(redisDb *db, robj *key) {
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
