@@ -192,6 +192,194 @@ static sds syncSelectCommand(int fd, mstime_t timeout, int dbid) {
                : NULL;
 }
 
+// ---------------- MIGRATE RIO COMMAND ------------------------------------- //
+
+typedef struct {
+    rio rio;
+    sds payload;
+    mstime_t timeout;
+    int replace;
+    int non_blocking;
+    int num_requests;
+    struct {
+        robj* key;
+        mstime_t ttl;
+    } privdata;
+    struct {
+        int fd;
+        sds buffer_ptr;
+    } io;
+} rioMigrateCommand;
+
+#define RIO_GOTO_IF_ERROR(e)         \
+    do {                             \
+        if (!(e)) {                  \
+            goto rio_failed_cleanup; \
+        }                            \
+    } while (0)
+
+#define RIO_MAX_IOBUF_LEN (64LL * 1024 * 1024)
+
+static int rioMigrateCommandFlushIOBuffer(rioMigrateCommand* cmd, int force) {
+    if (!force && sdslen(cmd->io.buffer_ptr) < RIO_MAX_IOBUF_LEN) {
+        return 1;
+    }
+    if (syncWriteBuffer(cmd->io.fd, cmd->io.buffer_ptr, cmd->timeout) != C_OK) {
+        return 0;
+    }
+    sdsclear(cmd->io.buffer_ptr);
+    return 1;
+}
+
+static int rioMigrateCommandNonBlockingFragment(rioMigrateCommand* cmd) {
+    rio _rio;
+    rio* rio = &_rio;
+    rioInitWithBuffer(rio, cmd->io.buffer_ptr);
+
+    robj* key = cmd->privdata.key;
+    const char* cmd_name =
+        server.cluster_enabled ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASYNC";
+
+    if (cmd->num_requests != 0) {
+        goto rio_fragment_payload;
+    }
+    RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', 3));
+    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, cmd_name, strlen(cmd_name)));
+    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
+    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "PREPARE", 7));
+    cmd->num_requests++;
+
+rio_fragment_payload:
+    RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', 4));
+    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, cmd_name, strlen(cmd_name)));
+    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
+    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "PAYLOAD", 7));
+    RIO_GOTO_IF_ERROR(
+        rioWriteBulkString(rio, cmd->payload, sdslen(cmd->payload)));
+    cmd->num_requests++;
+
+    sdsclear(cmd->payload);
+    cmd->io.buffer_ptr = rio->io.buffer.ptr;
+    return rioMigrateCommandFlushIOBuffer(cmd, 0);
+
+rio_failed_cleanup:
+    cmd->io.buffer_ptr = rio->io.buffer.ptr;
+    return 0;
+}
+
+static size_t rioMigrateObjectRead(rio* r, void* buf, size_t len) {
+    UNUSED(r);
+    UNUSED(buf);
+    UNUSED(len);
+    serverPanic("Unsupported operation.");
+}
+
+static off_t rioMigrateObjectTell(rio* r) {
+    UNUSED(r);
+    serverPanic("Unsupported operation.");
+}
+
+#define RIO_MIGRATE_COMMAND(r) \
+    ((rioMigrateCommand*)((char*)(r)-offsetof(rioMigrateCommand, rio)))
+
+static int rioMigrateObjectFlush(rio* r) {
+    rioMigrateCommand* cmd = RIO_MIGRATE_COMMAND(r);
+
+    rio _rio;
+    rio* rio = &_rio;
+    rioInitWithBuffer(rio, cmd->io.buffer_ptr);
+
+    robj* key = cmd->privdata.key;
+    mstime_t ttl = cmd->privdata.ttl;
+
+    if (!cmd->non_blocking) {
+        const char* cmd_name =
+            server.cluster_enabled ? "RESTORE-ASKING" : "RESTORE";
+        RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', cmd->replace ? 5 : 4));
+        RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, cmd_name, strlen(cmd_name)));
+        RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
+        RIO_GOTO_IF_ERROR(rioWriteBulkLongLong(rio, ttl));
+        RIO_GOTO_IF_ERROR(
+            rioWriteBulkString(rio, cmd->payload, sdslen(cmd->payload)));
+        if (cmd->replace) {
+            RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "REPLACE", 7));
+        }
+        sdsclear(cmd->payload);
+        serverAssert(cmd->num_requests == 0);
+    } else {
+        if (sdslen(cmd->payload) != 0 &&
+            !rioMigrateCommandNonBlockingFragment(cmd)) {
+            return 0;
+        }
+        const char* cmd_name =
+            server.cluster_enabled ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASYNC";
+        RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', cmd->replace ? 5 : 4));
+        RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, cmd_name, strlen(cmd_name)));
+        RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
+        RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "RESTORE", 7));
+        RIO_GOTO_IF_ERROR(rioWriteBulkLongLong(rio, ttl));
+        if (cmd->replace) {
+            RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "REPLACE", 7));
+        }
+        serverAssert(cmd->num_requests >= 2);
+    }
+
+    cmd->num_requests++;
+    cmd->io.buffer_ptr = rio->io.buffer.ptr;
+    return rioMigrateCommandFlushIOBuffer(cmd, 0);
+
+rio_failed_cleanup:
+    cmd->io.buffer_ptr = rio->io.buffer.ptr;
+    return 0;
+}
+
+static size_t rioMigrateObjectWrite(rio* r, const void* buf, size_t len) {
+    rioMigrateCommand* cmd = RIO_MIGRATE_COMMAND(r);
+    cmd->payload = sdscatlen(cmd->payload, buf, len);
+    if (!cmd->non_blocking) {
+        return 1;
+    }
+    if (sdslen(cmd->payload) < RIO_MAX_IOBUF_LEN) {
+        return 1;
+    }
+    return rioMigrateCommandNonBlockingFragment(cmd);
+}
+
+static const rio rioMigrateObjectIO = {
+    .read = rioMigrateObjectRead,
+    .tell = rioMigrateObjectTell,
+    .flush = rioMigrateObjectFlush,
+    .write = rioMigrateObjectWrite,
+    .update_cksum = rioGenericUpdateChecksum,
+};
+
+static int rioMigrateCommandObject(rioMigrateCommand* cmd, robj* key, robj* obj,
+                                   mstime_t ttl) {
+    cmd->num_requests = 0;
+    cmd->privdata.key = key;
+    cmd->privdata.ttl = ttl;
+
+    rio* rio = &cmd->rio;
+    rio->cksum = 0;
+
+    RIO_GOTO_IF_ERROR(rdbSaveObjectType(rio, obj));
+    RIO_GOTO_IF_ERROR(rdbSaveObject(rio, obj));
+
+    uint16_t ver = RDB_VERSION;
+    memrev64ifbe(&ver);
+    RIO_GOTO_IF_ERROR(rioWrite(rio, &ver, sizeof(ver)));
+
+    uint64_t crc = rio->cksum;
+    memrev64ifbe(&crc);
+    RIO_GOTO_IF_ERROR(rioWrite(rio, &crc, sizeof(crc)));
+
+    RIO_GOTO_IF_ERROR(rioFlush(rio));
+    return 1;
+
+rio_failed_cleanup:
+    return 0;
+}
+
 // ---------------- MIGRATE / MIGRATE-ASYNC --------------------------------- //
 
 struct _migrateCommandArgs {
