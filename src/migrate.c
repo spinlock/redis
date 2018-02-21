@@ -165,6 +165,33 @@ static sds syncPingCommand(int fd, mstime_t timeout) {
                : NULL;
 }
 
+static sds syncSelectCommand(int fd, mstime_t timeout, int dbid) {
+    rio cmd;
+    rioInitWithBuffer(&cmd, sdsempty());
+
+    const char* cmd_name = "SELECT";
+    serverAssert(rioWriteBulkCount(&cmd, '*', 2));
+    serverAssert(rioWriteBulkString(&cmd, cmd_name, strlen(cmd_name)));
+    serverAssert(rioWriteBulkLongLong(&cmd, dbid));
+
+    if (syncWriteBuffer(fd, cmd.io.buffer.ptr, timeout) != C_OK) {
+        sdsfree(cmd.io.buffer.ptr);
+        return sdscatfmt(sdsempty(), "Command %s failed, sending error '%s'.",
+                         cmd_name, strerror(errno));
+    }
+    sdsfree(cmd.io.buffer.ptr);
+
+    char buf[1024];
+    if (syncReadLine(fd, buf, sizeof(buf), timeout) <= 0) {
+        return sdscatfmt(sdsempty(), "Command %s failed, reading error '%s'.",
+                         cmd_name, strerror(errno));
+    }
+    return buf[0] != '+'
+               ? sdscatfmt(sdsempty(), "Command %s failed, target replied: %s",
+                           cmd_name, buf)
+               : NULL;
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
