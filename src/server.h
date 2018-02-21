@@ -955,7 +955,7 @@ struct redisServer {
     /* Fast pointers to often looked up command */
     struct redisCommand *delCommand, *multiCommand, *lpushCommand, *lpopCommand,
                         *rpopCommand, *sremCommand, *execCommand, *expireCommand,
-                        *pexpireCommand;
+                        *pexpireCommand, *restoreCommand;
     /* Fields used only for stats */
     time_t stat_starttime;          /* Server start time */
     long long stat_numcommands;     /* Number of processed commands */
