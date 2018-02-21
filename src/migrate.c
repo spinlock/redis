@@ -2,6 +2,100 @@
 
 extern void decrRefCountLazyfree(robj* obj);
 
+// ---------------- MIGRATE CACHED SOCKET ----------------------------------- //
+
+#define MIGRATE_SOCKET_CACHE_ITEMS 64
+#define MIGRATE_SOCKET_CACHE_TTL 10
+
+typedef struct {
+    int fd;
+    int last_dbid;
+    time_t last_use_time;
+    const char* name;
+    int inuse;
+    int error;
+    int authenticated;
+} migrateCachedSocket;
+
+static sds migrateSocketName(robj* host, robj* port, robj* auth) {
+    sds name = sdscatfmt(sdsempty(), "%S:%S#", host->ptr, port->ptr);
+    if (auth == NULL) {
+        return name;
+    }
+    return sdscatsds(name, auth->ptr);
+}
+
+static void migrateCloseSocket(migrateCachedSocket* cs) {
+    dictDelete(server.migrate_cached_sockets, cs->name);
+    close(cs->fd);
+    zfree(cs);
+}
+
+void migrateCloseTimedoutSockets(void) {
+    dictIterator* di = dictGetSafeIterator(server.migrate_cached_sockets);
+    dictEntry* entry;
+    while ((entry = dictNext(di)) != NULL) {
+        migrateCachedSocket* cs = dictGetVal(entry);
+        if (cs->inuse ||
+            server.unixtime - cs->last_use_time <= MIGRATE_SOCKET_CACHE_TTL) {
+            continue;
+        }
+        migrateCloseSocket(cs);
+    }
+    dictReleaseIterator(di);
+}
+
+static migrateCachedSocket* migrateGetSocketOrReply(client* c, robj* host,
+                                                    robj* port, robj* auth,
+                                                    mstime_t timeout) {
+    sds name = migrateSocketName(host, port, auth);
+    migrateCachedSocket* cs =
+        dictFetchValue(server.migrate_cached_sockets, name);
+    if (cs != NULL) {
+        sdsfree(name);
+        if (!cs->inuse) {
+            return cs;
+        }
+        addReplySds(
+            c, sdscatfmt(sdsempty(), "-RETRYLATER target %S:%S is busy.\r\n",
+                         host->ptr, port->ptr));
+        return NULL;
+    }
+
+    if (dictSize(server.migrate_cached_sockets) == MIGRATE_SOCKET_CACHE_ITEMS) {
+        dictEntry* entry = dictGetRandomKey(server.migrate_cached_sockets);
+        migrateCloseSocket(dictGetVal(entry));
+    }
+
+    int fd = anetTcpNonBlockConnect(server.neterr, host->ptr, atoi(port->ptr));
+    if (fd == -1) {
+        sdsfree(name);
+        addReplyErrorFormat(c, "Can't connect to target node: '%s'.",
+                            server.neterr);
+        return NULL;
+    }
+    anetEnableTcpNoDelay(server.neterr, fd);
+
+    if ((aeWait(fd, AE_WRITABLE, timeout) & AE_WRITABLE) == 0) {
+        sdsfree(name);
+        addReplySds(
+            c, sdsnew("-IOERR error or timeout connecting to the client.\r\n"));
+        close(fd);
+        return NULL;
+    }
+
+    cs = zmalloc(sizeof(*cs));
+    cs->fd = fd;
+    cs->last_dbid = -1;
+    cs->last_use_time = server.unixtime;
+    cs->name = name;
+    cs->inuse = 0;
+    cs->error = 0;
+    cs->authenticated = 0;
+    dictAdd(server.migrate_cached_sockets, name, cs);
+    return cs;
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
@@ -60,12 +154,13 @@ static restoreCommandArgs* initRestoreCommandArgs(client* c, robj* key,
     args->replace = replace;
     args->non_blocking = non_blocking;
     args->fragments = listCreate();
-    args->client = c;
+    args->last_update_time = server.unixtime;
     if (server.cluster_enabled) {
         args->cmdstr = non_blocking ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASKING";
     } else {
         args->cmdstr = non_blocking ? "RESTORE-ASYNC" : "RESTORE";
     }
+    args->client = c;
     incrRefCount(key);
     return args;
 }
@@ -231,5 +326,4 @@ void unblockClientFromMigrate(client* c) { UNUSED(c); }
 void unblockClientFromRestore(client* c) { UNUSED(c); }
 void freeMigrateCommandArgsFromFreeClient(client* c) { UNUSED(c); }
 void freeRestoreCommandArgsFromFreeClient(client* c) { UNUSED(c); }
-void migrateCloseTimedoutSockets(void) {}
 void restoreCloseTimedoutCommands(void) {}
