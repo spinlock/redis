@@ -96,6 +96,49 @@ static migrateCachedSocket* migrateGetSocketOrReply(client* c, robj* host,
     return cs;
 }
 
+#define SYNC_WRITE_IOBUF_LEN (64 * 1024)
+
+static int syncWriteBuffer(int fd, sds buffer, mstime_t timeout) {
+    ssize_t pos = 0, towrite, written;
+    while ((towrite = sdslen(buffer) - pos) > 0) {
+        towrite =
+            (towrite > SYNC_WRITE_IOBUF_LEN ? SYNC_WRITE_IOBUF_LEN : towrite);
+        written = syncWrite(fd, buffer + pos, towrite, timeout);
+        if (written != towrite) {
+            return C_ERR;
+        }
+        pos += written;
+    }
+    return C_OK;
+}
+
+static sds syncAuthCommand(int fd, mstime_t timeout, sds password) {
+    rio cmd;
+    rioInitWithBuffer(&cmd, sdsempty());
+
+    const char* cmd_name = "AUTH";
+    serverAssert(rioWriteBulkCount(&cmd, '*', 2));
+    serverAssert(rioWriteBulkString(&cmd, cmd_name, strlen(cmd_name)));
+    serverAssert(rioWriteBulkString(&cmd, password, sdslen(password)));
+
+    if (syncWriteBuffer(fd, cmd.io.buffer.ptr, timeout) != C_OK) {
+        sdsfree(cmd.io.buffer.ptr);
+        return sdscatfmt(sdsempty(), "Command %s failed, sending error '%s'.",
+                         cmd_name, strerror(errno));
+    }
+    sdsfree(cmd.io.buffer.ptr);
+
+    char buf[1024];
+    if (syncReadLine(fd, buf, sizeof(buf), timeout) <= 0) {
+        return sdscatfmt(sdsempty(), "Command %s failed, reading error '%s'.",
+                         cmd_name, strerror(errno));
+    }
+    return buf[0] != '+'
+               ? sdscatfmt(sdsempty(), "Command %s failed, target replied: %s",
+                           cmd_name, buf)
+               : NULL;
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
@@ -114,7 +157,7 @@ struct _restoreCommandArgs {
     time_t last_update_time;
     sds errmsg;
 
-    const char* cmdstr;
+    const char* cmd_name;
 
     client* client;
     int processing;
@@ -156,9 +199,10 @@ static restoreCommandArgs* initRestoreCommandArgs(client* c, robj* key,
     args->fragments = listCreate();
     args->last_update_time = server.unixtime;
     if (server.cluster_enabled) {
-        args->cmdstr = non_blocking ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASKING";
+        args->cmd_name =
+            non_blocking ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASKING";
     } else {
-        args->cmdstr = non_blocking ? "RESTORE-ASYNC" : "RESTORE";
+        args->cmd_name = non_blocking ? "RESTORE-ASYNC" : "RESTORE";
     }
     args->client = c;
     incrRefCount(key);
