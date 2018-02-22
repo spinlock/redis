@@ -564,6 +564,7 @@ static int migrateGenericCommandSendRequests(migrateCommandArgs* args) {
     }
 
     rioMigrateCommand _cmd = {
+        .rio = rioMigrateObjectIO,
         .payload = sdsempty(),
         .timeout = args->timeout,
         .replace = args->replace,
