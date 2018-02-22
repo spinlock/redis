@@ -1,7 +1,5 @@
 #include "server.h"
 
-extern void decrRefCountLazyfree(robj* obj);
-
 // ---------------- MIGRATE CACHED SOCKET ----------------------------------- //
 
 #define MIGRATE_SOCKET_CACHE_ITEMS 64
@@ -408,6 +406,8 @@ struct _migrateCommandArgs {
 
     client* client;
 };
+
+extern void decrRefCountLazyfree(robj* obj);
 
 static void freeMigrateCommandArgs(migrateCommandArgs* args) {
     if (args->host != NULL) {
@@ -949,9 +949,83 @@ void restoreCommand(client* c) {
     freeRestoreCommandArgs(args);
 }
 
+// ---------------- BACKGROUND THREAD --------------------------------------- //
+
+typedef struct {
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    struct {
+        list* jobs;
+        list* done;
+    } migrate, restore;
+    int pipe_fds[2];
+} migrateCommandThread;
+
+static migrateCommandThread migrate_command_threads[1];
+
+static void* migrateCommandThreadMain(void* privdata) {
+    // TODO
+    UNUSED(privdata);
+    serverPanic("TODO");
+    return NULL;
+}
+
+static void migrateCommandThreadReadEvent(aeEventLoop* el, int fd,
+                                          void* privdata, int mask) {
+    // TODO
+    UNUSED(el);
+    UNUSED(fd);
+    UNUSED(mask);
+    UNUSED(privdata);
+    serverPanic("TODO");
+}
+
+static void migrateCommandThreadInit(migrateCommandThread* p) {
+    size_t stacksize;
+    pthread_attr_init(&p->attr);
+    pthread_attr_getstacksize(&p->attr, &stacksize);
+    while (stacksize < 4LL * 1024 * 1024) {
+        stacksize = (stacksize < 1024) ? 1024 : stacksize * 2;
+    }
+    pthread_attr_setstacksize(&p->attr, stacksize);
+    pthread_mutex_init(&p->mutex, NULL);
+    pthread_cond_init(&p->cond, NULL);
+
+    p->migrate.jobs = listCreate();
+    p->migrate.done = listCreate();
+    p->restore.jobs = listCreate();
+    p->restore.done = listCreate();
+
+    if (pipe(p->pipe_fds) != 0) {
+        serverPanic("Fatal: create pipe '%s'.", strerror(errno));
+        exit(1);
+    }
+    if (anetNonBlock(NULL, p->pipe_fds[0]) != ANET_OK) {
+        serverPanic("Fatal: call anetNonBlock '%s'.", strerror(errno));
+        exit(1);
+    }
+    if (aeCreateFileEvent(server.el, p->pipe_fds[0], AE_READABLE,
+                          migrateCommandThreadReadEvent, p) == AE_ERR) {
+        serverPanic("Fatal: call aeCreateFileEvent '%s'.", strerror(errno));
+        exit(1);
+    }
+
+    // TODO (jemalloc) fix arena id=0
+    int ret = pthread_create(&p->thread, &p->attr, migrateCommandThreadMain, p);
+    if (ret != 0) {
+        serverPanic("Fatal: call pthread_create '%s'.", strerror(ret));
+        exit(1);
+    }
+}
+
+void migrateBackgroundThread(void) {
+    migrateCommandThreadInit(&migrate_command_threads[0]);
+}
+
 /* ---------------- TODO ---------------------------------------------------- */
 
-void migrateBackgroundThread(void) {}
 void unblockClientFromMigrate(client* c) { UNUSED(c); }
 void unblockClientFromRestore(client* c) { UNUSED(c); }
 void freeMigrateCommandArgsFromFreeClient(client* c) { UNUSED(c); }
