@@ -647,8 +647,6 @@ failed_socket_error:
     return 0;
 }
 
-static void migrateGenericCommandPropagateMigrate(migrateCommandArgs* args);
-
 static void migrateGenericCommandReplyAndPropagate(migrateCommandArgs* args) {
     client* c = args->client;
     if (c != NULL) {
@@ -693,6 +691,27 @@ static void migrateGenericCommandReplyAndPropagate(migrateCommandArgs* args) {
 
     decrRefCount(propargv[0]);
     zfree(propargv);
+}
+
+void migrateCommand(client* c) {
+    migrateCommandArgs* args = initMigrateCommandArgsOrReply(c, 0);
+    if (args == NULL) {
+        return;
+    }
+    serverAssert(c->migrate_command_args == NULL);
+
+    if (migrateGenericCommandSendRequests(args)) {
+        migrateGenericCommandFetchReplies(args);
+    }
+    migrateGenericCommandReplyAndPropagate(args);
+
+    freeMigrateCommandArgs(args);
+}
+
+void migrateAsyncCommand(client* c) {
+    UNUSED(c);
+    // TODO
+    serverPanic("TODO");
 }
 
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
@@ -919,7 +938,9 @@ void restoreCommand(client* c) {
     args->total_bytes += sdslen(c->argv[3]->ptr);
 
     // TODO
-    serverAssert(!non_blocking);
+    if (non_blocking) {
+        serverPanic("TODO");
+    }
 
     restoreGenericCommandExtractPayload(args);
 
@@ -931,8 +952,6 @@ void restoreCommand(client* c) {
 /* ---------------- TODO ---------------------------------------------------- */
 
 void migrateBackgroundThread(void) {}
-void migrateCommand(client* c) { UNUSED(c); }
-void migrateAsyncCommand(client* c) { UNUSED(c); }
 void unblockClientFromMigrate(client* c) { UNUSED(c); }
 void unblockClientFromRestore(client* c) { UNUSED(c); }
 void freeMigrateCommandArgsFromFreeClient(client* c) { UNUSED(c); }
