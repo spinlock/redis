@@ -541,6 +541,71 @@ failed_cleanup:
     return NULL;
 }
 
+static int migrateGenericCommandSendRequests(migrateCommandArgs* args) {
+    migrateCachedSocket* cs = args->socket;
+    if (!cs->authenticated) {
+        if (args->auth != NULL) {
+            args->errmsg =
+                syncAuthCommand(cs->fd, args->timeout, args->auth->ptr);
+        } else {
+            args->errmsg = syncPingCommand(cs->fd, args->timeout);
+        }
+        if (args->errmsg != NULL) {
+            goto failed_socket_error;
+        }
+        cs->authenticated = 1;
+    }
+    if (cs->last_dbid != args->dbid) {
+        args->errmsg = syncSelectCommand(cs->fd, args->dbid, args->timeout);
+        if (args->errmsg != NULL) {
+            goto failed_socket_error;
+        }
+        cs->last_dbid = args->dbid;
+    }
+
+    rioMigrateCommand _cmd = {
+        .payload = sdsempty(),
+        .timeout = args->timeout,
+        .replace = args->replace,
+        .non_blocking = args->non_blocking,
+        .io = {.fd = cs->fd, .buffer_ptr = sdsempty()},
+    };
+    rioMigrateCommand* cmd = &_cmd;
+
+    for (int j = 0; j < args->num_keys; j++) {
+        robj* key = args->kvpairs[j].key;
+        robj* obj = args->kvpairs[j].obj;
+        mstime_t ttl = 0;
+        mstime_t expireat = args->kvpairs[j].expireat;
+        if (expireat != -1) {
+            ttl = expireat - mstime();
+            ttl = (ttl < 1) ? 1 : ttl;
+        }
+        RIO_GOTO_IF_ERROR(rioMigrateCommandObject(cmd, key, obj, ttl));
+
+        args->kvpairs[j].pending = cmd->num_requests;
+    }
+    RIO_GOTO_IF_ERROR(rioMigrateCommandFlushIOBuffer(cmd, 1));
+
+    sdsfree(cmd->payload);
+    sdsfree(cmd->io.buffer_ptr);
+
+    args->socket->last_use_time = server.unixtime;
+    return 1;
+
+rio_failed_cleanup:
+    sdsfree(cmd->payload);
+    sdsfree(cmd->io.buffer_ptr);
+
+    args->errmsg =
+        sdscatfmt(sdsempty(), "Command %s failed, sending error '%s'.",
+                  args->cmd_name, strerror(errno));
+
+failed_socket_error:
+    args->socket->error = 1;
+    return 0;
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
