@@ -647,6 +647,54 @@ failed_socket_error:
     return 0;
 }
 
+static void migrateGenericCommandPropagateMigrate(migrateCommandArgs* args);
+
+static void migrateGenericCommandReplyAndPropagate(migrateCommandArgs* args) {
+    client* c = args->client;
+    if (c != NULL) {
+        if (args->errmsg != NULL) {
+            addReplyError(c, args->errmsg);
+        } else {
+            addReply(c, shared.ok);
+        }
+    }
+    if (args->copy) {
+        return;
+    }
+
+    robj** propargv = zmalloc(sizeof(propargv[0]) * (1 + args->num_keys));
+    int migrated = 0;
+    for (int j = 0; j < args->num_keys; j++) {
+        if (!args->kvpairs[j].success) {
+            continue;
+        }
+        migrated++;
+
+        robj* key = args->kvpairs[j].key;
+        propargv[migrated] = key;
+
+        dbDelete(args->db, key);
+        signalModifiedKey(args->db, key);
+        server.dirty++;
+    }
+
+    if (migrated == 0) {
+        zfree(propargv);
+        return;
+    }
+    if (c != NULL && !args->non_blocking) {
+        preventCommandPropagation(c);
+    }
+
+    propargv[0] = createStringObject("DEL", 3);
+
+    propagate(server.delCommand, args->db->id, propargv, 1 + migrated,
+              PROPAGATE_AOF | PROPAGATE_REPL);
+
+    decrRefCount(propargv[0]);
+    zfree(propargv);
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
@@ -761,8 +809,6 @@ static int restoreGenericCommandExtractPayload(restoreCommandArgs* args) {
     return 1;
 }
 
-static void restoreGenericCommandPropagateRestore(restoreCommandArgs* args);
-
 static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
     client* c = args->client;
     if (args->errmsg != NULL) {
@@ -797,11 +843,8 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
     if (c != NULL && !args->non_blocking) {
         preventCommandPropagation(c);
     }
-    restoreGenericCommandPropagateRestore(args);
-}
 
-// RESTORE key ttl serialized-value REPLACE [ASYNC]
-static void restoreGenericCommandPropagateRestore(restoreCommandArgs* args) {
+    // RESTORE key ttl serialized-value REPLACE [ASYNC]
     robj* propargv[6];
     propargv[0] = createStringObject("RESTORE", 7);
     propargv[1] = args->key;
