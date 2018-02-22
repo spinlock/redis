@@ -673,9 +673,6 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
         }
         return;
     }
-    if (c != NULL) {
-        addReply(c, shared.ok);
-    }
 
     if (overwrite) {
         dbDelete(args->db, args->key);
@@ -689,14 +686,18 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
     signalModifiedKey(args->db, args->key);
     server.dirty++;
 
-    // TODO Forward RESTORE-ASYNC for non-blocking migration.
-
+    if (c != NULL) {
+        addReply(c, shared.ok);
+    }
+    if (c != NULL && !args->non_blocking) {
+        preventCommandPropagation(c);
+    }
     restoreGenericCommandPropagateRestore(args);
 }
 
-// RESTORE key ttl serialized-value REPLACE
+// RESTORE key ttl serialized-value REPLACE [ASYNC]
 static void restoreGenericCommandPropagateRestore(restoreCommandArgs* args) {
-    robj* propargv[5];
+    robj* propargv[6];
     propargv[0] = createStringObject("RESTORE", 7);
     propargv[1] = args->key;
     incrRefCount(propargv[1]);
@@ -705,7 +706,11 @@ static void restoreGenericCommandPropagateRestore(restoreCommandArgs* args) {
     incrRefCount(propargv[3]);
     propargv[4] = createStringObject("REPLACE", 7);
 
-    int propargc = sizeof(propargv) / sizeof(propargv[0]);
+    int propargc = sizeof(propargv) / sizeof(propargv[0]) - 1;
+    if (args->non_blocking) {
+        propargv[5] = createStringObject("ASYNC", 5);
+        propargc++;
+    }
 
     propagate(server.restoreCommand, args->db->id, propargv, propargc,
               PROPAGATE_AOF | PROPAGATE_REPL);
@@ -728,12 +733,14 @@ void restoreAsyncCommand(client* c) {
     serverPanic("TODO");
 }
 
-// RESTORE key ttl serialized-value [REPLACE]
+// RESTORE key ttl serialized-value [REPLACE] [ASYNC]
 void restoreCommand(client* c) {
-    int replace = 0;
+    int replace = 0, non_blocking = 0;
     for (int j = 4; j < c->argc; j++) {
         if (strcasecmp(c->argv[j]->ptr, "REPLACE") == 0) {
             replace = 1;
+        } else if (strcasecmp(c->argv[j]->ptr, "ASYNC") == 0) {
+            non_blocking = 1;
         } else {
             addReply(c, shared.syntaxerr);
             return;
@@ -750,7 +757,10 @@ void restoreCommand(client* c) {
     serverAssert(c->restore_command_args == NULL);
 
     restoreCommandArgs* args =
-        initRestoreCommandArgs(c, c->argv[1], ttl, replace, 0);
+        initRestoreCommandArgs(c, c->argv[1], ttl, replace, non_blocking);
+
+    // TODO
+    serverAssert(!args->non_blocking);
 
     incrRefCount(c->argv[3]);
     listAddNodeTail(args->fragments, c->argv[3]);
