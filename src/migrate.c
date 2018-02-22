@@ -309,7 +309,7 @@ static int rioMigrateObjectFlush(rio* r) {
     } else {
         if (sdslen(cmd->payload) != 0 &&
             !rioMigrateCommandNonBlockingFragment(cmd)) {
-            return 0;
+            goto rio_failed_cleanup;
         }
         const char* cmd_name =
             server.cluster_enabled ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASYNC";
@@ -355,12 +355,12 @@ static const rio rioMigrateObjectIO = {
 
 static int rioMigrateCommandObject(rioMigrateCommand* cmd, robj* key, robj* obj,
                                    mstime_t ttl) {
+    rio* rio = &cmd->rio;
+    rio->cksum = 0;
+
     cmd->num_requests = 0;
     cmd->privdata.key = key;
     cmd->privdata.ttl = ttl;
-
-    rio* rio = &cmd->rio;
-    rio->cksum = 0;
 
     RIO_GOTO_IF_ERROR(rdbSaveObjectType(rio, obj));
     RIO_GOTO_IF_ERROR(rdbSaveObject(rio, obj));
