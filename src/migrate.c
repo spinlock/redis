@@ -554,7 +554,7 @@ struct _restoreCommandArgs {
     list* fragments;
     size_t total_bytes;
 
-    robj* raw_bytes;
+    robj* payload;
 
     time_t last_update_time;
     sds errmsg;
@@ -580,8 +580,8 @@ static void freeRestoreCommandArgs(restoreCommandArgs* args) {
     }
     listRelease(args->fragments);
 
-    if (args->raw_bytes != NULL) {
-        decrRefCount(args->raw_bytes);
+    if (args->payload != NULL) {
+        decrRefCount(args->payload);
     }
     if (args->errmsg != NULL) {
         sdsfree(args->errmsg);
@@ -615,22 +615,22 @@ extern int verifyDumpPayload(unsigned char* p, size_t len);
 
 static int restoreGenericCommandExtractPayload(restoreCommandArgs* args) {
     if (listLength(args->fragments) != 1) {
-        sds raw_bytes_ptr = sdsMakeRoomFor(sdsempty(), args->total_bytes);
+        sds payload_ptr = sdsMakeRoomFor(sdsempty(), args->total_bytes);
         while (listLength(args->fragments) != 0) {
             listNode* head = listFirst(args->fragments);
-            raw_bytes_ptr =
-                sdscatsds(raw_bytes_ptr, ((robj*)listNodeValue(head))->ptr);
+            payload_ptr =
+                sdscatsds(payload_ptr, ((robj*)listNodeValue(head))->ptr);
             decrRefCount(listNodeValue(head));
             listDelNode(args->fragments, head);
         }
-        args->raw_bytes = createObject(OBJ_STRING, raw_bytes_ptr);
+        args->payload = createObject(OBJ_STRING, payload_ptr);
     } else {
         listNode* head = listFirst(args->fragments);
         incrRefCount(listNodeValue(head));
-        args->raw_bytes = listNodeValue(head);
+        args->payload = listNodeValue(head);
     }
 
-    void* ptr = args->raw_bytes->ptr;
+    void* ptr = args->payload->ptr;
     if (verifyDumpPayload(ptr, sdslen(ptr)) != C_OK) {
         args->errmsg =
             sdscatfmt(sdsempty(), "DUMP payload version or checksum are wrong");
@@ -701,7 +701,7 @@ static void restoreGenericCommandPropagateRestore(restoreCommandArgs* args) {
     propargv[1] = args->key;
     incrRefCount(propargv[1]);
     propargv[2] = createStringObjectFromLongLong(args->ttl);
-    propargv[3] = args->raw_bytes;
+    propargv[3] = args->payload;
     incrRefCount(propargv[3]);
     propargv[4] = createStringObject("REPLACE", 7);
 
