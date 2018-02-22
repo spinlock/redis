@@ -606,6 +606,46 @@ failed_socket_error:
     return 0;
 }
 
+static int migrateGenericCommandFetchReplies(migrateCommandArgs* args) {
+    migrateCachedSocket* cs = args->socket;
+    for (int j = 0; j < args->num_keys; j++) {
+        int errors = 0;
+        for (int i = 0; i < args->kvpairs[j].pending; i++) {
+            char buf[1024];
+            if (syncReadLine(cs->fd, buf, sizeof(buf), args->timeout) <= 0) {
+                goto failed_socket_error;
+            }
+            if (buf[0] == '+') {
+                continue;
+            }
+            errors++;
+            if (args->errmsg != NULL) {
+                continue;
+            }
+            args->errmsg =
+                sdscatfmt(sdsempty(), "Command %s failed, target replied: %s",
+                          args->cmd_name, buf);
+        }
+        if (errors == 0) {
+            args->kvpairs[j].success = 1;
+        }
+    }
+
+    args->socket->last_use_time = server.unixtime;
+    return 1;
+
+failed_socket_error:
+    if (args->errmsg != NULL) {
+        sdsfree(args->errmsg);
+    }
+    args->errmsg =
+        sdscatfmt(sdsempty(), "Command %s failed, reading error '%s'.",
+                  args->cmd_name, strerror(errno));
+
+    args->socket->error = 1;
+    return 0;
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
