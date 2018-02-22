@@ -405,6 +405,7 @@ struct _migrateCommandArgs {
     const char* cmd_name;
 
     client* client;
+    int processing;
 };
 
 extern void decrRefCountLazyfree(robj* obj);
@@ -963,22 +964,66 @@ typedef struct {
     int pipe_fds[2];
 } migrateCommandThread;
 
-static migrateCommandThread migrate_command_threads[1];
-
 static void* migrateCommandThreadMain(void* privdata) {
-    // TODO
-    UNUSED(privdata);
-    serverPanic("TODO");
-    return NULL;
+    migrateCommandThread* p = privdata;
+
+    // TODO (jemalloc) fix arena id=0
+    while (1) {
+        migrateCommandArgs* migrate_args = NULL;
+        restoreCommandArgs* restore_args = NULL;
+
+        pthread_mutex_lock(&p->mutex);
+        {
+            while (listLength(p->migrate.jobs) == 0 &&
+                   listLength(p->restore.jobs) == 0) {
+                pthread_cond_wait(&p->cond, &p->mutex);
+            }
+            if (listLength(p->migrate.jobs) != 0) {
+                migrate_args = listNodeValue(listFirst(p->migrate.jobs));
+            }
+            if (listLength(p->restore.jobs) != 0) {
+                restore_args = listNodeValue(listFirst(p->restore.jobs));
+            }
+        }
+        pthread_mutex_unlock(&p->mutex);
+
+        if (migrate_args != NULL) {
+            serverAssert(migrate_args->processing);
+            if (migrateGenericCommandSendRequests(migrate_args)) {
+                migrateGenericCommandFetchReplies(migrate_args);
+            }
+        }
+        if (restore_args != NULL) {
+            serverAssert(restore_args->processing);
+            restoreGenericCommandExtractPayload(restore_args);
+        }
+
+        pthread_mutex_lock(&p->mutex);
+        {
+            if (migrate_args != NULL) {
+                listDelNode(p->migrate.jobs, listFirst(p->migrate.jobs));
+                listAddNodeTail(p->migrate.done, migrate_args);
+            }
+            if (restore_args != NULL) {
+                listDelNode(p->restore.jobs, listFirst(p->restore.jobs));
+                listAddNodeTail(p->restore.done, restore_args);
+            }
+        }
+        pthread_mutex_unlock(&p->mutex);
+
+        serverAssert(write(p->pipe_fds[1], ".", 1) == 1);
+    }
 }
 
 static void migrateCommandThreadReadEvent(aeEventLoop* el, int fd,
                                           void* privdata, int mask) {
-    // TODO
     UNUSED(el);
     UNUSED(fd);
     UNUSED(mask);
-    UNUSED(privdata);
+
+    // TODO
+    migrateCommandThread* p = privdata;
+    UNUSED(p);
     serverPanic("TODO");
 }
 
@@ -1012,7 +1057,6 @@ static void migrateCommandThreadInit(migrateCommandThread* p) {
         exit(1);
     }
 
-    // TODO (jemalloc) fix arena id=0
     int ret = pthread_create(&p->thread, &p->attr, migrateCommandThreadMain, p);
     if (ret != 0) {
         serverPanic("Fatal: call pthread_create '%s'.", strerror(ret));
@@ -1020,8 +1064,32 @@ static void migrateCommandThreadInit(migrateCommandThread* p) {
     }
 }
 
+static migrateCommandThread migrate_command_threads[1];
+
 void migrateBackgroundThread(void) {
     migrateCommandThreadInit(&migrate_command_threads[0]);
+}
+
+static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args) {
+    migrateCommandThread* p = &migrate_command_threads[0];
+    pthread_mutex_lock(&p->mutex);
+    {
+        args->processing = 1;
+        listAddNodeTail(p->migrate.jobs, args);
+        pthread_cond_broadcast(&p->cond);
+    }
+    pthread_mutex_unlock(&p->mutex);
+}
+
+static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
+    migrateCommandThread* p = &migrate_command_threads[0];
+    pthread_mutex_lock(&p->mutex);
+    {
+        args->processing = 1;
+        listAddNodeTail(p->restore.jobs, args);
+        pthread_cond_broadcast(&p->cond);
+    }
+    pthread_mutex_unlock(&p->mutex);
 }
 
 /* ---------------- TODO ---------------------------------------------------- */
