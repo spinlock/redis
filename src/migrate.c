@@ -667,14 +667,13 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
     }
 
     int overwrite = lookupKeyWrite(args->db, args->key) != NULL;
-    if (overwrite && !args->replace) {
-        if (c != NULL) {
-            addReply(c, shared.busykeyerr);
-        }
-        return;
-    }
-
     if (overwrite) {
+        if (!args->replace) {
+            if (c != NULL) {
+                addReply(c, shared.busykeyerr);
+            }
+            return;
+        }
         dbDelete(args->db, args->key);
     }
     incrRefCount(args->obj);
@@ -747,6 +746,13 @@ void restoreCommand(client* c) {
         }
     }
 
+    if (non_blocking) {
+        if (c->flags & CLIENT_LUA) {
+            addReplyError(c, "Option ASYNC is not allowed from scripts.");
+            return;
+        }
+    }
+
     long long ttl;
     if (getLongLongFromObjectOrReply(c, c->argv[2], &ttl, NULL) != C_OK) {
         return;
@@ -759,12 +765,12 @@ void restoreCommand(client* c) {
     restoreCommandArgs* args =
         initRestoreCommandArgs(c, c->argv[1], ttl, replace, non_blocking);
 
-    // TODO
-    serverAssert(!args->non_blocking);
-
     incrRefCount(c->argv[3]);
     listAddNodeTail(args->fragments, c->argv[3]);
     args->total_bytes += sdslen(c->argv[3]->ptr);
+
+    // TODO
+    serverAssert(!non_blocking);
 
     restoreGenericCommandExtractPayload(args);
 
