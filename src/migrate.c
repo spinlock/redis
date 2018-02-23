@@ -715,6 +715,11 @@ void migrateAsyncCommand(client* c) {
     serverPanic("TODO");
 }
 
+static void migrateAsyncCommandCallback(migrateCommandArgs* args) {
+    // TODO
+    UNUSED(args);
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
@@ -888,6 +893,11 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
     }
 }
 
+static void restoreAsyncCommandCallback(restoreCommandArgs* args) {
+    // TODO
+    UNUSED(args);
+}
+
 // RESTORE-ASYNC key PREPARE
 // RESTORE-ASYNC key PAYLOAD serialized-fragment
 // RESTORE-ASYNC key RESTORE ttl [REPLACE]
@@ -980,32 +990,34 @@ static void* migrateCommandThreadMain(void* privdata) {
             }
             if (listLength(p->migrate.jobs) != 0) {
                 migrate_args = listNodeValue(listFirst(p->migrate.jobs));
+                listDelNode(p->migrate.jobs, listFirst(p->migrate.jobs));
             }
             if (listLength(p->restore.jobs) != 0) {
                 restore_args = listNodeValue(listFirst(p->restore.jobs));
+                listDelNode(p->restore.jobs, listFirst(p->restore.jobs));
             }
         }
         pthread_mutex_unlock(&p->mutex);
 
         if (migrate_args != NULL) {
-            serverAssert(migrate_args->processing);
+            serverAssert(migrate_args->non_blocking &&
+                         migrate_args->processing);
             if (migrateGenericCommandSendRequests(migrate_args)) {
                 migrateGenericCommandFetchReplies(migrate_args);
             }
         }
         if (restore_args != NULL) {
-            serverAssert(restore_args->processing);
+            serverAssert(restore_args->non_blocking &&
+                         restore_args->processing);
             restoreGenericCommandExtractPayload(restore_args);
         }
 
         pthread_mutex_lock(&p->mutex);
         {
             if (migrate_args != NULL) {
-                listDelNode(p->migrate.jobs, listFirst(p->migrate.jobs));
                 listAddNodeTail(p->migrate.done, migrate_args);
             }
             if (restore_args != NULL) {
-                listDelNode(p->restore.jobs, listFirst(p->restore.jobs));
                 listAddNodeTail(p->restore.done, restore_args);
             }
         }
@@ -1021,10 +1033,42 @@ static void migrateCommandThreadReadEvent(aeEventLoop* el, int fd,
     UNUSED(fd);
     UNUSED(mask);
 
-    // TODO
     migrateCommandThread* p = privdata;
-    UNUSED(p);
-    serverPanic("TODO");
+
+    char c;
+    int n = read(p->pipe_fds[0], &c, sizeof(c));
+    if (n != 1) {
+        serverAssert(n == -1 && errno == EAGAIN);
+    }
+
+    while (1) {
+        migrateCommandArgs* migrate_args = NULL;
+        restoreCommandArgs* restore_args = NULL;
+
+        pthread_mutex_lock(&p->mutex);
+        {
+            if (listLength(p->migrate.done) != 0) {
+                migrate_args = listNodeValue(listFirst(p->migrate.done));
+                listDelNode(p->migrate.done, listFirst(p->migrate.done));
+            }
+            if (listLength(p->restore.done) != 0) {
+                restore_args = listNodeValue(listFirst(p->restore.done));
+                listDelNode(p->restore.done, listFirst(p->restore.done));
+            }
+        }
+        pthread_mutex_unlock(&p->mutex);
+
+        if (migrate_args != NULL) {
+            migrateAsyncCommandCallback(migrate_args);
+        }
+        if (restore_args != NULL) {
+            restoreAsyncCommandCallback(restore_args);
+        }
+
+        if (migrate_args == NULL && restore_args == NULL) {
+            return;
+        }
+    }
 }
 
 static void migrateCommandThreadInit(migrateCommandThread* p) {
@@ -1035,8 +1079,8 @@ static void migrateCommandThreadInit(migrateCommandThread* p) {
         stacksize = (stacksize < 1024) ? 1024 : stacksize * 2;
     }
     pthread_attr_setstacksize(&p->attr, stacksize);
-    pthread_mutex_init(&p->mutex, NULL);
     pthread_cond_init(&p->cond, NULL);
+    pthread_mutex_init(&p->mutex, NULL);
 
     p->migrate.jobs = listCreate();
     p->migrate.done = listCreate();
@@ -1074,7 +1118,6 @@ static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args) {
     migrateCommandThread* p = &migrate_command_threads[0];
     pthread_mutex_lock(&p->mutex);
     {
-        args->processing = 1;
         listAddNodeTail(p->migrate.jobs, args);
         pthread_cond_broadcast(&p->cond);
     }
@@ -1085,7 +1128,6 @@ static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
     migrateCommandThread* p = &migrate_command_threads[0];
     pthread_mutex_lock(&p->mutex);
     {
-        args->processing = 1;
         listAddNodeTail(p->restore.jobs, args);
         pthread_cond_broadcast(&p->cond);
     }
