@@ -988,7 +988,7 @@ static void restoreAsyncCommandPrepare(client* c) {
         addReply(c, shared.syntaxerr);
         return;
     }
-    // TODO
+    // TODO rename prepare to cleanup
 }
 
 // RESTORE-ASYNC key PAYLOAD serialized-fragment
@@ -1057,6 +1057,7 @@ void restoreCommand(client* c) {
         addReplyError(c, "Invalid TTL value, must be >= 0");
         return;
     }
+    // TODO reply error if c->restore_command_args is non-nil
     serverAssert(c->restore_command_args == NULL);
 
     restoreCommandArgs* args =
