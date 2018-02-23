@@ -973,6 +973,8 @@ static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args);
 
 static void restoreAsyncCommandByCommandArgs(client* c,
                                              restoreCommandArgs* args) {
+    // TODO reset c->restore_command_args if the old one is not nil
+
     c->restore_command_args = args;
 
     migrateCommandThreadAddRestoreJobTail(args);
@@ -981,17 +983,50 @@ static void restoreAsyncCommandByCommandArgs(client* c,
 }
 
 // RESTORE-ASYNC key PREPARE
+static void restoreAsyncCommandPrepare(client* c) {
+    if (c->argc != 3) {
+        addReply(c, shared.syntaxerr);
+        return;
+    }
+    // TODO
+}
+
+// RESTORE-ASYNC key PAYLOAD serialized-fragment
+static void restoreAsyncCommandPayload(client* c) {
+    if (c->argc != 4) {
+        addReply(c, shared.syntaxerr);
+        return;
+    }
+    // TODO
+}
+
+// RESTORE-ASYNC key RESTORE ttl [REPLACE]
+static void restoreAsyncCommandRestore(client* c) {
+    if (c->argc <= 3) {
+        addReply(c, shared.syntaxerr);
+        return;
+    }
+    // TODO
+}
+
+// RESTORE-ASYNC key PREPARE
 // RESTORE-ASYNC key PAYLOAD serialized-fragment
 // RESTORE-ASYNC key RESTORE ttl [REPLACE]
 void restoreAsyncCommand(client* c) {
-    robj* key = c->argv[1];
-    robj* cmd = c->argv[2];
-    UNUSED(key);
-    UNUSED(cmd);
-    UNUSED(c);
-
-    // TODO
-    serverPanic("TODO");
+    robj* sub = c->argv[2];
+    if (strcasecmp(sub->ptr, "PREPARE") == 0) {
+        restoreAsyncCommandPrepare(c);
+        return;
+    }
+    if (strcasecmp(sub->ptr, "PAYLOAD") == 0) {
+        restoreAsyncCommandPayload(c);
+        return;
+    }
+    if (strcasecmp(sub->ptr, "RESTORE") == 0) {
+        restoreAsyncCommandRestore(c);
+        return;
+    }
+    addReplyErrorFormat(c, "Unknown operation: %s", sub->ptr);
 }
 
 // RESTORE key ttl serialized-value [REPLACE] [ASYNC]
