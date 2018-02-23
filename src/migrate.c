@@ -709,15 +709,52 @@ void migrateCommand(client* c) {
     freeMigrateCommandArgs(args);
 }
 
-void migrateAsyncCommand(client* c) {
-    UNUSED(c);
-    // TODO
-    serverPanic("TODO");
+static void migrateAsyncCommandCallback(migrateCommandArgs* args) {
+    serverAssert(args->client == NULL ||
+                 args->client->migrate_command_args == args);
+
+    dict* locked_keys = args->db->migrate_locked_keys;
+    for (int j = 0; j < args->num_keys; j++) {
+        robj* key = args->kvpairs[j].key;
+        serverAssert(dictDelete(locked_keys, key) == DICT_OK);
+    }
+    migrateGenericCommandReplyAndPropagate(args);
+
+    client* c = args->client;
+    if (c != NULL) {
+        unblockClient(c);
+    }
+
+    freeMigrateCommandArgs(args);
 }
 
-static void migrateAsyncCommandCallback(migrateCommandArgs* args) {
-    // TODO
-    UNUSED(args);
+static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args);
+
+void migrateAsyncCommand(client* c) {
+    migrateCommandArgs* args = initMigrateCommandArgsOrReply(c, 1);
+    if (args == NULL) {
+        return;
+    }
+    serverAssert(c->migrate_command_args == NULL);
+
+    dict* locked_keys = args->db->migrate_locked_keys;
+    for (int j = 0; j < args->num_keys; j++) {
+        robj* key = args->kvpairs[j].key;
+        incrRefCount(key);
+        serverAssert(dictAdd(locked_keys, key, NULL) == DICT_OK);
+    }
+    c->migrate_command_args = args;
+
+    migrateCommandThreadAddMigrateJobTail(args);
+
+    blockClient(c, BLOCKED_MIGRATE);
+}
+
+void unblockClientFromMigrate(client* c) {
+    serverAssert(c->migrate_command_args != NULL &&
+                 c->migrate_command_args->client == c);
+    c->migrate_command_args->client = NULL;
+    c->migrate_command_args = NULL;
 }
 
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
@@ -896,6 +933,7 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
 static void restoreAsyncCommandCallback(restoreCommandArgs* args) {
     // TODO
     UNUSED(args);
+    // TODO check if the specific keys are being migrated
 }
 
 // RESTORE-ASYNC key PREPARE
@@ -1059,9 +1097,11 @@ static void migrateCommandThreadReadEvent(aeEventLoop* el, int fd,
         pthread_mutex_unlock(&p->mutex);
 
         if (migrate_args != NULL) {
+            migrate_args->processing = 0;
             migrateAsyncCommandCallback(migrate_args);
         }
         if (restore_args != NULL) {
+            restore_args->processing = 0;
             restoreAsyncCommandCallback(restore_args);
         }
 
@@ -1116,9 +1156,11 @@ void migrateBackgroundThread(void) {
 
 static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args) {
     migrateCommandThread* p = &migrate_command_threads[0];
+    migrateCommandArgs* migrate_args = args;
     pthread_mutex_lock(&p->mutex);
     {
-        listAddNodeTail(p->migrate.jobs, args);
+        migrate_args->processing = 1;
+        listAddNodeTail(p->migrate.jobs, migrate_args);
         pthread_cond_broadcast(&p->cond);
     }
     pthread_mutex_unlock(&p->mutex);
@@ -1126,9 +1168,11 @@ static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args) {
 
 static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
     migrateCommandThread* p = &migrate_command_threads[0];
+    restoreCommandArgs* restore_args = args;
     pthread_mutex_lock(&p->mutex);
     {
-        listAddNodeTail(p->restore.jobs, args);
+        restore_args->processing = 1;
+        listAddNodeTail(p->restore.jobs, restore_args);
         pthread_cond_broadcast(&p->cond);
     }
     pthread_mutex_unlock(&p->mutex);
@@ -1136,7 +1180,6 @@ static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
 
 /* ---------------- TODO ---------------------------------------------------- */
 
-void unblockClientFromMigrate(client* c) { UNUSED(c); }
 void unblockClientFromRestore(client* c) { UNUSED(c); }
 void freeMigrateCommandArgsFromFreeClient(client* c) { UNUSED(c); }
 void freeRestoreCommandArgsFromFreeClient(client* c) { UNUSED(c); }
