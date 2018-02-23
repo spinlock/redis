@@ -762,6 +762,10 @@ void freeMigrateCommandArgsFromFreeClient(client* c) {
     serverPanic("Should not arrive here.");
 }
 
+static int isLockedByMigrateAsyncCommand(redisDb* db, robj* key) {
+    return dictFind(db->migrate_locked_keys, key) != NULL;
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
@@ -885,6 +889,14 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
         return;
     }
 
+    if (isLockedByMigrateAsyncCommand(args->db, args->key)) {
+        if (c != NULL) {
+            addReplySds(c, sdscatfmt(sdsempty(), "-RETRYLATER %S is busy.\r\n",
+                                     args->key->ptr));
+        }
+        return;
+    }
+
     int overwrite = lookupKeyWrite(args->db, args->key) != NULL;
     if (overwrite) {
         if (!args->replace) {
@@ -935,10 +947,37 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
     }
 }
 
+static void restoreCommandByCommandArgs(restoreCommandArgs* args) {
+    restoreGenericCommandExtractPayload(args);
+
+    restoreGenericCommandReplyAndPropagate(args);
+
+    freeRestoreCommandArgs(args);
+}
+
 static void restoreAsyncCommandCallback(restoreCommandArgs* args) {
-    // TODO
-    UNUSED(args);
-    // TODO check if the specific keys are being migrated
+    serverAssert(args->client == NULL ||
+                 args->client->restore_command_args == args);
+
+    restoreGenericCommandReplyAndPropagate(args);
+
+    client* c = args->client;
+    if (c != NULL) {
+        unblockClient(c);
+    }
+
+    freeRestoreCommandArgs(args);
+}
+
+static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args);
+
+static void restoreAsyncCommandByCommandArgs(client* c,
+                                             restoreCommandArgs* args) {
+    c->restore_command_args = args;
+
+    migrateCommandThreadAddRestoreJobTail(args);
+
+    blockClient(c, BLOCKED_RESTORE);
 }
 
 // RESTORE-ASYNC key PREPARE
@@ -950,6 +989,7 @@ void restoreAsyncCommand(client* c) {
     UNUSED(key);
     UNUSED(cmd);
     UNUSED(c);
+
     // TODO
     serverPanic("TODO");
 }
@@ -991,16 +1031,11 @@ void restoreCommand(client* c) {
     listAddNodeTail(args->fragments, c->argv[3]);
     args->total_bytes += sdslen(c->argv[3]->ptr);
 
-    // TODO
-    if (non_blocking) {
-        serverPanic("TODO");
+    if (!non_blocking) {
+        restoreCommandByCommandArgs(args);
+    } else {
+        restoreAsyncCommandByCommandArgs(c, args);
     }
-
-    restoreGenericCommandExtractPayload(args);
-
-    restoreGenericCommandReplyAndPropagate(args);
-
-    freeRestoreCommandArgs(args);
 }
 
 // ---------------- BACKGROUND THREAD --------------------------------------- //
