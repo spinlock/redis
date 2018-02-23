@@ -757,6 +757,11 @@ void unblockClientFromMigrate(client* c) {
     c->migrate_command_args = NULL;
 }
 
+void freeMigrateCommandArgsFromFreeClient(client* c) {
+    UNUSED(c);
+    serverPanic("Should not arrive here.");
+}
+
 // ---------------- RESTORE / RESTORE-ASYNC --------------------------------- //
 
 struct _restoreCommandArgs {
@@ -1181,6 +1186,5 @@ static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
 /* ---------------- TODO ---------------------------------------------------- */
 
 void unblockClientFromRestore(client* c) { UNUSED(c); }
-void freeMigrateCommandArgsFromFreeClient(client* c) { UNUSED(c); }
 void freeRestoreCommandArgsFromFreeClient(client* c) { UNUSED(c); }
 void restoreCloseTimedoutCommands(void) {}
