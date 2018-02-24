@@ -241,17 +241,16 @@ static int rioMigrateCommandNonBlockingFragment(rioMigrateCommand* cmd) {
     if (cmd->num_requests != 0) {
         goto rio_fragment_payload;
     }
-    RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', 3));
+    RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', 2));
     RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, cmd_name, strlen(cmd_name)));
-    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
-    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "PREPARE", 7));
+    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "RESET", 5));
     cmd->num_requests++;
 
 rio_fragment_payload:
     RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', 4));
     RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, cmd_name, strlen(cmd_name)));
-    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
     RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "PAYLOAD", 7));
+    RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
     RIO_GOTO_IF_ERROR(
         rioWriteBulkString(rio, cmd->payload, sdslen(cmd->payload)));
     cmd->num_requests++;
@@ -313,8 +312,8 @@ static int rioMigrateObjectFlush(rio* r) {
             server.cluster_enabled ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASYNC";
         RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', cmd->replace ? 5 : 4));
         RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, cmd_name, strlen(cmd_name)));
-        RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
         RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "RESTORE", 7));
+        RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, key->ptr, sdslen(key->ptr)));
         RIO_GOTO_IF_ERROR(rioWriteBulkLongLong(rio, ttl));
         if (cmd->replace) {
             RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "REPLACE", 7));
@@ -982,16 +981,7 @@ static void restoreAsyncCommandByCommandArgs(client* c,
     blockClient(c, BLOCKED_RESTORE);
 }
 
-// RESTORE-ASYNC key PREPARE
-static void restoreAsyncCommandPrepare(client* c) {
-    if (c->argc != 3) {
-        addReply(c, shared.syntaxerr);
-        return;
-    }
-    // TODO rename prepare to cleanup
-}
-
-// RESTORE-ASYNC key PAYLOAD serialized-fragment
+// RESTORE-ASYNC PAYLOAD key serialized-fragment
 static void restoreAsyncCommandPayload(client* c) {
     if (c->argc != 4) {
         addReply(c, shared.syntaxerr);
@@ -1000,7 +990,7 @@ static void restoreAsyncCommandPayload(client* c) {
     // TODO
 }
 
-// RESTORE-ASYNC key RESTORE ttl [REPLACE]
+// RESTORE-ASYNC RESTORE key ttl [REPLACE]
 static void restoreAsyncCommandRestore(client* c) {
     if (c->argc <= 3) {
         addReply(c, shared.syntaxerr);
@@ -1009,13 +999,13 @@ static void restoreAsyncCommandRestore(client* c) {
     // TODO
 }
 
-// RESTORE-ASYNC key PREPARE
-// RESTORE-ASYNC key PAYLOAD serialized-fragment
-// RESTORE-ASYNC key RESTORE ttl [REPLACE]
+// RESTORE-ASYNC RESET
+// RESTORE-ASYNC PAYLOAD key serialized-fragment
+// RESTORE-ASYNC RESTORE key ttl [REPLACE]
 void restoreAsyncCommand(client* c) {
-    robj* sub = c->argv[2];
-    if (strcasecmp(sub->ptr, "PREPARE") == 0) {
-        restoreAsyncCommandPrepare(c);
+    robj* sub = c->argv[1];
+    if (strcasecmp(sub->ptr, "RESET") == 0) {
+        // TODO
         return;
     }
     if (strcasecmp(sub->ptr, "PAYLOAD") == 0) {
