@@ -986,7 +986,17 @@ static void restoreAsyncCommandByCommandArgs(client* c,
     blockClient(c, BLOCKED_RESTORE);
 }
 
-static void restoreAsyncCommandResetIfNeeded(client* c) {}
+static void restoreAsyncCommandResetIfNeeded(client* c) {
+    restoreCommandArgs* args = c->restore_command_args;
+    if (c->restore_command_args == NULL) {
+        return;
+    }
+    serverAssert(!args->processing);
+
+    c->restore_command_args = NULL;
+
+    freeRestoreCommandArgs(args);
+}
 
 // RESTORE-ASYNC RESET
 // RESTORE-ASYNC PAYLOAD key serialized-fragment
