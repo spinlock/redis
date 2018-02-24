@@ -814,13 +814,10 @@ static void freeRestoreCommandArgs(restoreCommandArgs* args) {
 }
 
 static restoreCommandArgs* initRestoreCommandArgs(client* c, robj* key,
-                                                  mstime_t ttl, int replace,
                                                   int non_blocking) {
     restoreCommandArgs* args = zcalloc(sizeof(*args));
     args->db = c->db;
     args->key = key;
-    args->ttl = ttl;
-    args->replace = replace;
     args->non_blocking = non_blocking;
     args->fragments = listCreate();
     args->last_update_time = server.unixtime;
@@ -946,7 +943,9 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
     }
 }
 
-static void restoreCommandByCommandArgs(restoreCommandArgs* args) {
+static void restoreCommandByCommandArgs(client* c, restoreCommandArgs* args) {
+    serverAssert(c->restore_command_args == NULL);
+
     restoreGenericCommandExtractPayload(args);
 
     restoreGenericCommandReplyAndPropagate(args);
@@ -971,52 +970,96 @@ static void restoreAsyncCommandCallback(restoreCommandArgs* args) {
 static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args);
 
 static void restoreAsyncCommandByCommandArgs(client* c,
-                                             restoreCommandArgs* args) {
-    // TODO reset c->restore_command_args if the old one is not nil
-
-    c->restore_command_args = args;
+                                             restoreCommandArgs* args,
+                                             mstime_t ttl, int replace) {
+    if (args != NULL) {
+        serverAssert(c->restore_command_args == NULL);
+        c->restore_command_args = args;
+    } else {
+        serverAssert(c->restore_command_args != NULL);
+        args = c->restore_command_args;
+    }
+    args->ttl = ttl, args->replace = replace;
 
     migrateCommandThreadAddRestoreJobTail(args);
 
     blockClient(c, BLOCKED_RESTORE);
 }
 
-// RESTORE-ASYNC PAYLOAD key serialized-fragment
-static void restoreAsyncCommandPayload(client* c) {
-    if (c->argc != 4) {
-        addReply(c, shared.syntaxerr);
-        return;
-    }
-    // TODO
-}
-
-// RESTORE-ASYNC RESTORE key ttl [REPLACE]
-static void restoreAsyncCommandRestore(client* c) {
-    if (c->argc <= 3) {
-        addReply(c, shared.syntaxerr);
-        return;
-    }
-    // TODO
-}
+static void restoreAsyncCommandResetIfNeeded(client* c) {}
 
 // RESTORE-ASYNC RESET
 // RESTORE-ASYNC PAYLOAD key serialized-fragment
 // RESTORE-ASYNC RESTORE key ttl [REPLACE]
 void restoreAsyncCommand(client* c) {
     robj* sub = c->argv[1];
+
+    // RESTORE-ASYNC RESET
     if (strcasecmp(sub->ptr, "RESET") == 0) {
-        // TODO
+        if (c->argc != 2) {
+            goto failed_syntax_error;
+        }
+        restoreAsyncCommandResetIfNeeded(c);
+        addReply(c, shared.ok);
         return;
     }
+
+    // RESTORE-ASYNC PAYLOAD key serialized-fragment
     if (strcasecmp(sub->ptr, "PAYLOAD") == 0) {
-        restoreAsyncCommandPayload(c);
+        if (c->argc != 4) {
+            goto failed_syntax_error;
+        }
+        if (c->restore_command_args == NULL) {
+            c->restore_command_args = initRestoreCommandArgs(c, c->argv[2], 1);
+        } else if (compareStringObjects(c->argv[2],
+                                        c->restore_command_args->key) != 0) {
+            goto failed_syntax_error;
+        }
+        restoreCommandArgs* args = c->restore_command_args;
+
+        incrRefCount(c->argv[3]);
+        listAddNodeTail(args->fragments, c->argv[3]);
+        args->total_bytes += sdslen(c->argv[3]->ptr);
+
+        addReply(c, shared.ok);
         return;
     }
+
+    // RESTORE-ASYNC RESTORE key ttl [REPLACE]
     if (strcasecmp(sub->ptr, "RESTORE") == 0) {
-        restoreAsyncCommandRestore(c);
+        if (c->argc < 4) {
+            goto failed_syntax_error;
+        }
+        int replace = 0;
+        for (int j = 4; j < c->argc; j++) {
+            if (strcasecmp(c->argv[j]->ptr, "REPLACE") == 0) {
+                replace = 1;
+            } else {
+                goto failed_syntax_error;
+            }
+        }
+
+        long long ttl;
+        if (getLongLongFromObjectOrReply(c, c->argv[3], &ttl, NULL) != C_OK) {
+            return;
+        } else if (ttl < 0) {
+            addReplyError(c, "Invalid TTL value, must be >= 0");
+            return;
+        }
+
+        if (c->restore_command_args == NULL) {
+            goto failed_syntax_error;
+        } else if (compareStringObjects(c->argv[2],
+                                        c->restore_command_args->key) != 0) {
+            goto failed_syntax_error;
+        }
+
+        restoreAsyncCommandByCommandArgs(c, NULL, ttl, replace);
         return;
     }
-    addReplyErrorFormat(c, "Unknown operation: %s", sub->ptr);
+
+failed_syntax_error:
+    addReply(c, shared.syntaxerr);
 }
 
 // RESTORE key ttl serialized-value [REPLACE] [ASYNC]
@@ -1047,20 +1090,19 @@ void restoreCommand(client* c) {
         addReplyError(c, "Invalid TTL value, must be >= 0");
         return;
     }
-    // TODO reply error if c->restore_command_args is non-nil
-    serverAssert(c->restore_command_args == NULL);
+    restoreAsyncCommandResetIfNeeded(c);
 
     restoreCommandArgs* args =
-        initRestoreCommandArgs(c, c->argv[1], ttl, replace, non_blocking);
+        initRestoreCommandArgs(c, c->argv[1], non_blocking);
 
     incrRefCount(c->argv[3]);
     listAddNodeTail(args->fragments, c->argv[3]);
     args->total_bytes += sdslen(c->argv[3]->ptr);
 
     if (!non_blocking) {
-        restoreCommandByCommandArgs(args);
+        restoreCommandByCommandArgs(c, args);
     } else {
-        restoreAsyncCommandByCommandArgs(c, args);
+        restoreAsyncCommandByCommandArgs(c, args, ttl, replace);
     }
 }
 
@@ -1223,9 +1265,12 @@ void migrateBackgroundThread(void) {
 static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args) {
     migrateCommandThread* p = &migrate_command_threads[0];
     migrateCommandArgs* migrate_args = args;
+
+    serverAssert(!migrate_args->processing);
+    migrate_args->processing = 1;
+
     pthread_mutex_lock(&p->mutex);
     {
-        migrate_args->processing = 1;
         listAddNodeTail(p->migrate.jobs, migrate_args);
         pthread_cond_broadcast(&p->cond);
     }
@@ -1235,9 +1280,12 @@ static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args) {
 static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
     migrateCommandThread* p = &migrate_command_threads[0];
     restoreCommandArgs* restore_args = args;
+
+    serverAssert(!restore_args->processing);
+    restore_args->processing = 1;
+
     pthread_mutex_lock(&p->mutex);
     {
-        restore_args->processing = 1;
         listAddNodeTail(p->restore.jobs, restore_args);
         pthread_cond_broadcast(&p->cond);
     }
