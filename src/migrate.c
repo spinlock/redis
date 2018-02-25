@@ -68,8 +68,10 @@ static migrateCachedSocket* migrateGetSocketOrReply(client* c, robj* host,
     int fd = anetTcpNonBlockConnect(server.neterr, host->ptr, atoi(port->ptr));
     if (fd == -1) {
         sdsfree(name);
-        addReplyErrorFormat(c, "Can't connect to target node: '%s'.",
-                            server.neterr);
+        addReplySds(c,
+                    sdscatfmt(sdsempty(),
+                              "-IOERR Can't connect to target node: '%s'.\r\n",
+                              server.neterr));
         return NULL;
     }
     anetEnableTcpNoDelay(server.neterr, fd);
@@ -121,18 +123,21 @@ static sds syncAuthCommand(int fd, mstime_t timeout, sds password) {
 
     if (syncWriteBuffer(fd, cmd.io.buffer.ptr, timeout) != C_OK) {
         sdsfree(cmd.io.buffer.ptr);
-        return sdscatfmt(sdsempty(), "Command %s failed, sending error '%s'.",
+        return sdscatfmt(sdsempty(),
+                         "-IOERR Command %s failed, sending error '%s'.\r\n",
                          cmd_name, strerror(errno));
     }
     sdsfree(cmd.io.buffer.ptr);
 
     char buf[1024];
     if (syncReadLine(fd, buf, sizeof(buf), timeout) <= 0) {
-        return sdscatfmt(sdsempty(), "Command %s failed, reading error '%s'.",
+        return sdscatfmt(sdsempty(),
+                         "-IOERR Command %s failed, reading error '%s'.\r\n",
                          cmd_name, strerror(errno));
     }
     return buf[0] != '+'
-               ? sdscatfmt(sdsempty(), "Command %s failed, target replied: %s",
+               ? sdscatfmt(sdsempty(),
+                           "-ERR Command %s failed, target replied: %s.\r\n",
                            cmd_name, buf)
                : NULL;
 }
@@ -147,18 +152,21 @@ static sds syncPingCommand(int fd, mstime_t timeout) {
 
     if (syncWriteBuffer(fd, cmd.io.buffer.ptr, timeout) != C_OK) {
         sdsfree(cmd.io.buffer.ptr);
-        return sdscatfmt(sdsempty(), "Command %s failed, sending error '%s'.",
+        return sdscatfmt(sdsempty(),
+                         "-IOERR Command %s failed, sending error '%s'.\r\n",
                          cmd_name, strerror(errno));
     }
     sdsfree(cmd.io.buffer.ptr);
 
     char buf[1024];
     if (syncReadLine(fd, buf, sizeof(buf), timeout) <= 0) {
-        return sdscatfmt(sdsempty(), "Command %s failed, reading error '%s'.",
+        return sdscatfmt(sdsempty(),
+                         "-IOERR Command %s failed, reading error '%s'.\r\n",
                          cmd_name, strerror(errno));
     }
     return buf[0] != '+'
-               ? sdscatfmt(sdsempty(), "Command %s failed, target replied: %s",
+               ? sdscatfmt(sdsempty(),
+                           "-ERR Command %s failed, target replied: %s.\r\n",
                            cmd_name, buf)
                : NULL;
 }
@@ -174,18 +182,21 @@ static sds syncSelectCommand(int fd, mstime_t timeout, int dbid) {
 
     if (syncWriteBuffer(fd, cmd.io.buffer.ptr, timeout) != C_OK) {
         sdsfree(cmd.io.buffer.ptr);
-        return sdscatfmt(sdsempty(), "Command %s failed, sending error '%s'.",
+        return sdscatfmt(sdsempty(),
+                         "-IOERR Command %s failed, sending error '%s'.\r\n",
                          cmd_name, strerror(errno));
     }
     sdsfree(cmd.io.buffer.ptr);
 
     char buf[1024];
     if (syncReadLine(fd, buf, sizeof(buf), timeout) <= 0) {
-        return sdscatfmt(sdsempty(), "Command %s failed, reading error '%s'.",
+        return sdscatfmt(sdsempty(),
+                         "-IOERR Command %s failed, reading error '%s'.\r\n",
                          cmd_name, strerror(errno));
     }
     return buf[0] != '+'
-               ? sdscatfmt(sdsempty(), "Command %s failed, target replied: %s",
+               ? sdscatfmt(sdsempty(),
+                           "-ERR Command %s failed, target replied: %s.\r\n",
                            cmd_name, buf)
                : NULL;
 }
@@ -603,7 +614,7 @@ rio_failed_cleanup:
     sdsfree(cmd->io.buffer_ptr);
 
     args->errmsg =
-        sdscatfmt(sdsempty(), "Command %s failed, sending error '%s'.",
+        sdscatfmt(sdsempty(), "-ERR Command %s failed, sending error '%s'.\r\n",
                   args->cmd_name, strerror(errno));
 
 failed_socket_error:
@@ -627,9 +638,9 @@ static int migrateGenericCommandFetchReplies(migrateCommandArgs* args) {
             if (args->errmsg != NULL) {
                 continue;
             }
-            args->errmsg =
-                sdscatfmt(sdsempty(), "Command %s failed, target replied: %s",
-                          args->cmd_name, buf);
+            args->errmsg = sdscatfmt(
+                sdsempty(), "-ERR Command %s failed, target replied: %s.\r\n",
+                args->cmd_name, buf);
         }
         if (errors == 0) {
             args->kvpairs[j].success = 1;
@@ -643,9 +654,9 @@ failed_socket_error:
     if (args->errmsg != NULL) {
         sdsfree(args->errmsg);
     }
-    args->errmsg =
-        sdscatfmt(sdsempty(), "Command %s failed, reading error '%s'.",
-                  args->cmd_name, strerror(errno));
+    args->errmsg = sdscatfmt(
+        sdsempty(), "-IOERR Command %s failed, reading error '%s'.\r\n",
+        args->cmd_name, strerror(errno));
 
     args->socket->error = 1;
     return 0;
@@ -655,7 +666,7 @@ static void migrateGenericCommandReplyAndPropagate(migrateCommandArgs* args) {
     client* c = args->client;
     if (c != NULL) {
         if (args->errmsg != NULL) {
-            addReplyError(c, args->errmsg);
+            addReplySds(c, sdsdup(args->errmsg));
         } else {
             addReply(c, shared.ok);
         }
@@ -883,8 +894,8 @@ static int restoreGenericCommandExtractPayload(restoreCommandArgs* args) {
 
     void* ptr = args->payload->ptr;
     if (verifyDumpPayload(ptr, sdslen(ptr)) != C_OK) {
-        args->errmsg =
-            sdscatfmt(sdsempty(), "DUMP payload version or checksum are wrong");
+        args->errmsg = sdscatfmt(
+            sdsempty(), "-ERR DUMP payload version or checksum are wrong.\r\n");
         return 0;
     }
 
@@ -893,14 +904,14 @@ static int restoreGenericCommandExtractPayload(restoreCommandArgs* args) {
 
     int type = rdbLoadObjectType(&payload);
     if (type == -1) {
-        args->errmsg =
-            sdscatfmt(sdsempty(), "Bad data format, invalid object type.");
+        args->errmsg = sdscatfmt(
+            sdsempty(), "-ERR Bad data format, invalid object type.\r\n");
         return 0;
     }
     args->obj = rdbLoadObject(type, &payload);
     if (args->obj == NULL) {
-        args->errmsg =
-            sdscatfmt(sdsempty(), "Bad data format, invalid object data.");
+        args->errmsg = sdscatfmt(
+            sdsempty(), "-ERR Bad data format, invalid object data.\r\n");
         return 0;
     }
     return 1;
