@@ -282,6 +282,16 @@ static off_t rioMigrateObjectTell(rio* r) {
 static int rioMigrateObjectFlush(rio* r) {
     rioMigrateCommand* cmd = RIO_MIGRATE_COMMAND(r);
 
+    if (!cmd->non_blocking) {
+        serverAssert(cmd->num_requests == 0);
+    } else {
+        if (sdslen(cmd->payload) != 0 &&
+            !rioMigrateCommandNonBlockingFragment(cmd)) {
+            return 0;
+        }
+        serverAssert(cmd->num_requests >= 2);
+    }
+
     rio _rio;
     rio* rio = &_rio;
     rioInitWithBuffer(rio, cmd->io.buffer_ptr);
@@ -302,12 +312,7 @@ static int rioMigrateObjectFlush(rio* r) {
             RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "REPLACE", 7));
         }
         sdsclear(cmd->payload);
-        serverAssert(cmd->num_requests == 0);
     } else {
-        if (sdslen(cmd->payload) != 0 &&
-            !rioMigrateCommandNonBlockingFragment(cmd)) {
-            goto rio_failed_cleanup;
-        }
         const char* cmd_name =
             server.cluster_enabled ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASYNC";
         RIO_GOTO_IF_ERROR(rioWriteBulkCount(rio, '*', cmd->replace ? 5 : 4));
@@ -318,7 +323,6 @@ static int rioMigrateObjectFlush(rio* r) {
         if (cmd->replace) {
             RIO_GOTO_IF_ERROR(rioWriteBulkString(rio, "REPLACE", 7));
         }
-        serverAssert(cmd->num_requests >= 2);
     }
 
     cmd->num_requests++;
