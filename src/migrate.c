@@ -711,6 +711,7 @@ void migrateCommand(client* c) {
 static void migrateAsyncCommandCallback(migrateCommandArgs* args) {
     serverAssert(args->client == NULL ||
                  args->client->migrate_command_args == args);
+    serverAssert(args->processing);
 
     dict* locked_keys = args->db->migrate_locked_keys;
     for (int j = 0; j < args->num_keys; j++) {
@@ -744,6 +745,7 @@ void migrateAsyncCommand(client* c) {
         serverAssert(dictAdd(locked_keys, key, NULL) == DICT_OK);
     }
     c->migrate_command_args = args;
+    c->migrate_command_args->processing = 1;
 
     migrateCommandThreadAddMigrateJobTail(args);
 
@@ -753,6 +755,7 @@ void migrateAsyncCommand(client* c) {
 void unblockClientFromMigrate(client* c) {
     serverAssert(c->migrate_command_args != NULL &&
                  c->migrate_command_args->client == c);
+    serverAssert(c->migrate_command_args->processing);
     c->migrate_command_args->client = NULL;
     c->migrate_command_args = NULL;
 }
@@ -957,6 +960,7 @@ static void restoreCommandByCommandArgs(client* c, restoreCommandArgs* args) {
 static void restoreAsyncCommandCallback(restoreCommandArgs* args) {
     serverAssert(args->client == NULL ||
                  args->client->restore_command_args == args);
+    serverAssert(args->processing);
 
     restoreGenericCommandReplyAndPropagate(args);
 
@@ -981,7 +985,9 @@ static void restoreAsyncCommandByCommandArgs(client* c,
         serverAssert(c->restore_command_args != NULL);
         args = c->restore_command_args;
     }
-    args->ttl = ttl, args->replace = replace;
+    c->restore_command_args->ttl = ttl;
+    c->restore_command_args->replace = replace;
+    c->restore_command_args->processing = 1;
 
     migrateCommandThreadAddRestoreJobTail(args);
 
@@ -1116,6 +1122,18 @@ void restoreCommand(client* c) {
     }
 }
 
+void unblockClientFromRestore(client* c) {
+    serverAssert(c->restore_command_args != NULL &&
+                 c->restore_command_args->client == c);
+    serverAssert(c->restore_command_args->processing);
+    c->restore_command_args->client = NULL;
+    c->restore_command_args = NULL;
+}
+
+void freeRestoreCommandArgsFromFreeClient(client* c) {
+    restoreAsyncCommandResetIfNeeded(c);
+}
+
 // ---------------- BACKGROUND THREAD --------------------------------------- //
 
 typedef struct {
@@ -1215,11 +1233,9 @@ static void migrateCommandThreadReadEvent(aeEventLoop* el, int fd,
         pthread_mutex_unlock(&p->mutex);
 
         if (migrate_args != NULL) {
-            migrate_args->processing = 0;
             migrateAsyncCommandCallback(migrate_args);
         }
         if (restore_args != NULL) {
-            restore_args->processing = 0;
             restoreAsyncCommandCallback(restore_args);
         }
 
@@ -1275,10 +1291,6 @@ void migrateBackgroundThread(void) {
 static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args) {
     migrateCommandThread* p = &migrate_command_threads[0];
     migrateCommandArgs* migrate_args = args;
-
-    serverAssert(!migrate_args->processing);
-    migrate_args->processing = 1;
-
     pthread_mutex_lock(&p->mutex);
     {
         listAddNodeTail(p->migrate.jobs, migrate_args);
@@ -1290,10 +1302,6 @@ static void migrateCommandThreadAddMigrateJobTail(migrateCommandArgs* args) {
 static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
     migrateCommandThread* p = &migrate_command_threads[0];
     restoreCommandArgs* restore_args = args;
-
-    serverAssert(!restore_args->processing);
-    restore_args->processing = 1;
-
     pthread_mutex_lock(&p->mutex);
     {
         listAddNodeTail(p->restore.jobs, restore_args);
@@ -1304,6 +1312,4 @@ static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
 
 /* ---------------- TODO ---------------------------------------------------- */
 
-void unblockClientFromRestore(client* c) { UNUSED(c); }
-void freeRestoreCommandArgsFromFreeClient(client* c) { UNUSED(c); }
 void restoreCloseTimedoutCommands(void) {}
