@@ -1083,6 +1083,12 @@ void restoreAsyncCommand(client* c) {
             return;
         }
 
+        int overwrite = lookupKeyWrite(c->db, c->argv[2]) != NULL;
+        if (overwrite && !replace) {
+            addReply(c, shared.busykeyerr);
+            return;
+        }
+
         if (c->restore_command_args == NULL) {
             goto failed_syntax_error;
         } else if (compareStringObjects(c->argv[2],
@@ -1127,6 +1133,12 @@ void restoreCommand(client* c) {
         return;
     } else if (ttl < 0) {
         addReplyError(c, "Invalid TTL value, must be >= 0");
+        return;
+    }
+
+    int overwrite = lookupKeyWrite(c->db, c->argv[1]) != NULL;
+    if (overwrite && !replace) {
+        addReply(c, shared.busykeyerr);
         return;
     }
     restoreGenericCommandResetIfNeeded(c);
