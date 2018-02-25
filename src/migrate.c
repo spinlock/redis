@@ -791,7 +791,11 @@ struct _restoreCommandArgs {
 
     client* client;
     int processing;
+
+    listNode* link_node;
 };
+
+static list* restore_command_args_list = NULL;
 
 static void freeRestoreCommandArgs(restoreCommandArgs* args) {
     if (args->key != NULL) {
@@ -814,6 +818,9 @@ static void freeRestoreCommandArgs(restoreCommandArgs* args) {
     if (args->errmsg != NULL) {
         sdsfree(args->errmsg);
     }
+    if (args->link_node != NULL) {
+        listDelNode(restore_command_args_list, args->link_node);
+    }
     zfree(args);
 }
 
@@ -825,6 +832,7 @@ static restoreCommandArgs* initRestoreCommandArgs(client* c, robj* key,
     args->non_blocking = non_blocking;
     args->fragments = listCreate();
     args->last_update_time = server.unixtime;
+
     if (server.cluster_enabled) {
         args->cmd_name =
             non_blocking ? "RESTORE-ASYNC-ASKING" : "RESTORE-ASKING";
@@ -833,7 +841,21 @@ static restoreCommandArgs* initRestoreCommandArgs(client* c, robj* key,
     }
     args->client = c;
     incrRefCount(key);
+
+    if (restore_command_args_list == NULL) {
+        restore_command_args_list = listCreate();
+    }
+    listAddNodeTail(restore_command_args_list, args);
+    args->link_node = listLast(restore_command_args_list);
     return args;
+}
+
+static void restoreGenericCommandAddFragment(restoreCommandArgs* args,
+                                             robj* data) {
+    incrRefCount(data);
+    listAddNodeTail(args->fragments, data);
+    args->total_bytes += sdslen(data->ptr);
+    args->last_update_time = server.unixtime;
 }
 
 extern int verifyDumpPayload(unsigned char* p, size_t len);
@@ -947,6 +969,18 @@ static void restoreGenericCommandReplyAndPropagate(restoreCommandArgs* args) {
     }
 }
 
+static void restoreGenericCommandResetIfNeeded(client* c) {
+    restoreCommandArgs* args = c->restore_command_args;
+    if (c->restore_command_args == NULL) {
+        return;
+    }
+    serverAssert(!args->processing);
+
+    c->restore_command_args = NULL;
+
+    freeRestoreCommandArgs(args);
+}
+
 static void restoreCommandByCommandArgs(client* c, restoreCommandArgs* args) {
     serverAssert(c->restore_command_args == NULL);
 
@@ -994,18 +1028,6 @@ static void restoreAsyncCommandByCommandArgs(client* c,
     blockClient(c, BLOCKED_RESTORE);
 }
 
-static void restoreAsyncCommandResetIfNeeded(client* c) {
-    restoreCommandArgs* args = c->restore_command_args;
-    if (c->restore_command_args == NULL) {
-        return;
-    }
-    serverAssert(!args->processing);
-
-    c->restore_command_args = NULL;
-
-    freeRestoreCommandArgs(args);
-}
-
 // RESTORE-ASYNC RESET
 // RESTORE-ASYNC PAYLOAD key serialized-fragment
 // RESTORE-ASYNC RESTORE key ttl [REPLACE]
@@ -1015,7 +1037,7 @@ void restoreAsyncCommand(client* c) {
         if (c->argc != 2) {
             goto failed_syntax_error;
         }
-        restoreAsyncCommandResetIfNeeded(c);
+        restoreGenericCommandResetIfNeeded(c);
         addReply(c, shared.ok);
         return;
     }
@@ -1032,10 +1054,7 @@ void restoreAsyncCommand(client* c) {
             goto failed_syntax_error;
         }
         restoreCommandArgs* args = c->restore_command_args;
-
-        incrRefCount(c->argv[3]);
-        listAddNodeTail(args->fragments, c->argv[3]);
-        args->total_bytes += sdslen(c->argv[3]->ptr);
+        restoreGenericCommandAddFragment(args, c->argv[3]);
 
         addReply(c, shared.ok);
         return;
@@ -1106,14 +1125,11 @@ void restoreCommand(client* c) {
         addReplyError(c, "Invalid TTL value, must be >= 0");
         return;
     }
-    restoreAsyncCommandResetIfNeeded(c);
+    restoreGenericCommandResetIfNeeded(c);
 
     restoreCommandArgs* args =
         initRestoreCommandArgs(c, c->argv[1], non_blocking);
-
-    incrRefCount(c->argv[3]);
-    listAddNodeTail(args->fragments, c->argv[3]);
-    args->total_bytes += sdslen(c->argv[3]->ptr);
+    restoreGenericCommandAddFragment(args, c->argv[3]);
 
     if (!non_blocking) {
         restoreCommandByCommandArgs(c, args);
@@ -1131,7 +1147,26 @@ void unblockClientFromRestore(client* c) {
 }
 
 void freeRestoreCommandArgsFromFreeClient(client* c) {
-    restoreAsyncCommandResetIfNeeded(c);
+    restoreGenericCommandResetIfNeeded(c);
+}
+
+void restoreCloseTimedoutCommands(void) {
+    if (restore_command_args_list == NULL) {
+        return;
+    }
+    listIter li;
+    listNode* ln;
+    listRewind(restore_command_args_list, &li);
+    while ((ln = listNext(&li))) {
+        restoreCommandArgs* args = listNodeValue(ln);
+        if (args->processing ||
+            server.unixtime - args->last_update_time <= 100) {
+            continue;
+        }
+        serverAssert(args->client != NULL &&
+                     args->client->restore_command_args == args);
+        restoreGenericCommandResetIfNeeded(args->client);
+    }
 }
 
 // ---------------- BACKGROUND THREAD --------------------------------------- //
@@ -1309,7 +1344,3 @@ static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args) {
     }
     pthread_mutex_unlock(&p->mutex);
 }
-
-/* ---------------- TODO ---------------------------------------------------- */
-
-void restoreCloseTimedoutCommands(void) {}
