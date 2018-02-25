@@ -556,7 +556,7 @@ static int migrateGenericCommandSendRequests(migrateCommandArgs* args) {
         cs->authenticated = 1;
     }
     if (cs->last_dbid != args->dbid) {
-        args->errmsg = syncSelectCommand(cs->fd, args->dbid, args->timeout);
+        args->errmsg = syncSelectCommand(cs->fd, args->timeout, args->dbid);
         if (args->errmsg != NULL) {
             goto failed_socket_error;
         }
@@ -1010,8 +1010,7 @@ static void restoreAsyncCommandCallback(restoreCommandArgs* args) {
 static void migrateCommandThreadAddRestoreJobTail(restoreCommandArgs* args);
 
 static void restoreAsyncCommandByCommandArgs(client* c,
-                                             restoreCommandArgs* args,
-                                             mstime_t ttl, int replace) {
+                                             restoreCommandArgs* args) {
     if (args != NULL) {
         serverAssert(c->restore_command_args == NULL);
         c->restore_command_args = args;
@@ -1019,8 +1018,6 @@ static void restoreAsyncCommandByCommandArgs(client* c,
         serverAssert(c->restore_command_args != NULL);
         args = c->restore_command_args;
     }
-    c->restore_command_args->ttl = ttl;
-    c->restore_command_args->replace = replace;
     c->restore_command_args->processing = 1;
 
     migrateCommandThreadAddRestoreJobTail(args);
@@ -1033,7 +1030,7 @@ static void restoreAsyncCommandByCommandArgs(client* c,
 // RESTORE-ASYNC RESTORE key ttl [REPLACE]
 void restoreAsyncCommand(client* c) {
     // RESTORE-ASYNC RESET
-    if (strcasecmp(c->argv[1]->ptr, "RESET") == 0) {
+    if (strcasecmp(c->argv[1]->ptr, "reset") == 0) {
         if (c->argc != 2) {
             goto failed_syntax_error;
         }
@@ -1043,7 +1040,7 @@ void restoreAsyncCommand(client* c) {
     }
 
     // RESTORE-ASYNC PAYLOAD key serialized-fragment
-    if (strcasecmp(c->argv[1]->ptr, "PAYLOAD") == 0) {
+    if (strcasecmp(c->argv[1]->ptr, "payload") == 0) {
         if (c->argc != 4) {
             goto failed_syntax_error;
         }
@@ -1061,13 +1058,13 @@ void restoreAsyncCommand(client* c) {
     }
 
     // RESTORE-ASYNC RESTORE key ttl [REPLACE]
-    if (strcasecmp(c->argv[1]->ptr, "RESTORE") == 0) {
+    if (strcasecmp(c->argv[1]->ptr, "restore") == 0) {
         if (c->argc < 4) {
             goto failed_syntax_error;
         }
         int replace = 0;
         for (int j = 4; j < c->argc; j++) {
-            if (strcasecmp(c->argv[j]->ptr, "REPLACE") == 0) {
+            if (strcasecmp(c->argv[j]->ptr, "replace") == 0) {
                 replace = 1;
             } else {
                 goto failed_syntax_error;
@@ -1088,8 +1085,11 @@ void restoreAsyncCommand(client* c) {
                                         c->restore_command_args->key) != 0) {
             goto failed_syntax_error;
         }
+        restoreCommandArgs* args = c->restore_command_args;
 
-        restoreAsyncCommandByCommandArgs(c, NULL, ttl, replace);
+        args->ttl = ttl, args->replace = replace;
+
+        restoreAsyncCommandByCommandArgs(c, NULL);
         return;
     }
 
@@ -1101,9 +1101,9 @@ failed_syntax_error:
 void restoreCommand(client* c) {
     int replace = 0, non_blocking = 0;
     for (int j = 4; j < c->argc; j++) {
-        if (strcasecmp(c->argv[j]->ptr, "REPLACE") == 0) {
+        if (strcasecmp(c->argv[j]->ptr, "replace") == 0) {
             replace = 1;
-        } else if (strcasecmp(c->argv[j]->ptr, "ASYNC") == 0) {
+        } else if (strcasecmp(c->argv[j]->ptr, "async") == 0) {
             non_blocking = 1;
         } else {
             addReply(c, shared.syntaxerr);
@@ -1131,10 +1131,12 @@ void restoreCommand(client* c) {
         initRestoreCommandArgs(c, c->argv[1], non_blocking);
     restoreGenericCommandAddFragment(args, c->argv[3]);
 
+    args->ttl = ttl, args->replace = replace;
+
     if (!non_blocking) {
         restoreCommandByCommandArgs(c, args);
     } else {
-        restoreAsyncCommandByCommandArgs(c, args, ttl, replace);
+        restoreAsyncCommandByCommandArgs(c, args);
     }
 }
 
