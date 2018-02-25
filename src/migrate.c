@@ -723,6 +723,7 @@ static void migrateAsyncCommandCallback(migrateCommandArgs* args) {
     if (c != NULL) {
         unblockClient(c);
     }
+    serverAssert(c->migrate_command_args == NULL);
 
     freeMigrateCommandArgs(args);
 }
@@ -963,6 +964,7 @@ static void restoreAsyncCommandCallback(restoreCommandArgs* args) {
     if (c != NULL) {
         unblockClient(c);
     }
+    serverAssert(c->restore_command_args == NULL);
 
     freeRestoreCommandArgs(args);
 }
@@ -1002,10 +1004,8 @@ static void restoreAsyncCommandResetIfNeeded(client* c) {
 // RESTORE-ASYNC PAYLOAD key serialized-fragment
 // RESTORE-ASYNC RESTORE key ttl [REPLACE]
 void restoreAsyncCommand(client* c) {
-    robj* sub = c->argv[1];
-
     // RESTORE-ASYNC RESET
-    if (strcasecmp(sub->ptr, "RESET") == 0) {
+    if (strcasecmp(c->argv[1]->ptr, "RESET") == 0) {
         if (c->argc != 2) {
             goto failed_syntax_error;
         }
@@ -1015,7 +1015,7 @@ void restoreAsyncCommand(client* c) {
     }
 
     // RESTORE-ASYNC PAYLOAD key serialized-fragment
-    if (strcasecmp(sub->ptr, "PAYLOAD") == 0) {
+    if (strcasecmp(c->argv[1]->ptr, "PAYLOAD") == 0) {
         if (c->argc != 4) {
             goto failed_syntax_error;
         }
@@ -1036,7 +1036,7 @@ void restoreAsyncCommand(client* c) {
     }
 
     // RESTORE-ASYNC RESTORE key ttl [REPLACE]
-    if (strcasecmp(sub->ptr, "RESTORE") == 0) {
+    if (strcasecmp(c->argv[1]->ptr, "RESTORE") == 0) {
         if (c->argc < 4) {
             goto failed_syntax_error;
         }
