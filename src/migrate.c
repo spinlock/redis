@@ -515,7 +515,7 @@ parsed_options:
     args->dbid = (int)dbid;
     args->timeout = (timeout <= 0) ? 1000 : timeout;
 
-    args->kvpairs = zmalloc(sizeof(args->kvpairs[0]) * num_keys);
+    args->kvpairs = zcalloc(sizeof(args->kvpairs[0]) * num_keys);
 
     for (int i = 0; i < num_keys; i++) {
         robj* key = c->argv[first_key + i];
