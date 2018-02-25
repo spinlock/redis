@@ -327,8 +327,7 @@ start_server {tags {"dump"}} {
             assert {[$second lrange list 0 -1] eq {d c b a}}
 
             r -1 lpush list a b c d
-            $second config set requirepass foobar2
-            catch {r -1 migrate $second_host $second_port list 9 5000 AUTH foobar} err
+            catch {r -1 migrate $second_host $second_port list 9 5000 AUTH foobar2} err
             assert_match {*invalid password*} $err
         }
     }
