@@ -762,6 +762,18 @@ void loadServerConfigFromString(char *config) {
                 err = sentinelHandleConfiguration(argv+1,argc-1);
                 if (err) goto loaderr;
             }
+        } else if (!strcasecmp(argv[0],"migrate-socket-cache-items") && argc == 2) {
+            server.migrate_socket_cache_items = atoi(argv[1]);
+            if (server.migrate_socket_cache_items < 0) {
+                err = "migrate-socket-cache-items can't be negative";
+                goto loaderr;
+            }
+        }else if (!strcasecmp(argv[0],"migrate-socket-cache-timeout") && argc == 2) {
+            server.migrate_socket_cache_timeout = atoi(argv[1]);
+            if (server.migrate_socket_cache_timeout <= 0) {
+                err = "migrate-socket-cache-timeout can't be negative or zero";
+                goto loaderr;
+            }
         } else {
             err = "Bad directive or wrong number of arguments"; goto loaderr;
         }
@@ -1158,6 +1170,10 @@ void configSetCommand(client *c) {
     } config_set_numerical_field(
       "cluster-slave-validity-factor",server.cluster_slave_validity_factor,0,INT_MAX) {
     } config_set_numerical_field(
+      "migrate-socket-cache-items",server.migrate_socket_cache_items,0,128) {
+    } config_set_numerical_field(
+      "migrate-socket-cache-timeout",server.migrate_socket_cache_timeout,1,86400) {
+    } config_set_numerical_field(
       "hz",server.hz,0,INT_MAX) {
         /* Hz is more an hint from the user, so we accept values out of range
          * but cap them to reasonable values. */
@@ -1335,6 +1351,8 @@ void configGetCommand(client *c) {
     config_get_numerical_field("cluster-slave-validity-factor",server.cluster_slave_validity_factor);
     config_get_numerical_field("repl-diskless-sync-delay",server.repl_diskless_sync_delay);
     config_get_numerical_field("tcp-keepalive",server.tcpkeepalive);
+    config_get_numerical_field("migrate-socket-cache-items",server.migrate_socket_cache_items);
+    config_get_numerical_field("migrate-socket-cache-timeout",server.migrate_socket_cache_timeout);
 
     /* Bool (yes/no) values */
     config_get_bool_field("cluster-require-full-coverage",
@@ -2108,6 +2126,8 @@ int rewriteConfig(char *path) {
     rewriteConfigYesNoOption(state,"lazyfree-lazy-expire",server.lazyfree_lazy_expire,CONFIG_DEFAULT_LAZYFREE_LAZY_EXPIRE);
     rewriteConfigYesNoOption(state,"lazyfree-lazy-server-del",server.lazyfree_lazy_server_del,CONFIG_DEFAULT_LAZYFREE_LAZY_SERVER_DEL);
     rewriteConfigYesNoOption(state,"slave-lazy-flush",server.repl_slave_lazy_flush,CONFIG_DEFAULT_SLAVE_LAZY_FLUSH);
+    rewriteConfigNumericalOption(state,"migrate-socket-cache-items",server.migrate_socket_cache_items,CONFIG_DEFAULT_MIGRATE_SOCKET_CACHE_ITEMS);
+    rewriteConfigNumericalOption(state,"migrate-socket-cache-timeout",server.migrate_socket_cache_timeout,CONFIG_DEFAULT_MIGRATE_SOCKET_CACHE_TIMEOUT);
 
     /* Rewrite Sentinel config if in Sentinel mode. */
     if (server.sentinel_mode) rewriteConfigSentinelOption(state);
